@@ -1,0 +1,22 @@
+# Environments
+.env
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Database
+*.db
+*.sqlite3
+
+# Uploads
+uploads/
+
+# Tool outputs / temporary files
+repomix-output.xml
+skills-lock.json

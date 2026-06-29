@@ -1,0 +1,257 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Wovely - Video-Based Clothing & Hair Attribute Extraction System">
+    <meta name="color-scheme" content="dark">
+    <title>Wovely | Attribute Extractor</title>
+    <!-- Google Fonts: Geist & Geist Mono -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700;800&family=Geist+Mono:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Lucide Icon Library -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="background-blobs" aria-hidden="true"></div>
+
+    <div class="app-container">
+        <!-- Header -->
+        <header class="app-header glass-card">
+            <div class="brand">
+                <span class="logo"><i data-lucide="cpu"></i></span>
+                <h1>Wovely</h1>
+                <span class="badge">Gemini-V1</span>
+            </div>
+            <nav class="nav-tabs">
+                <button class="nav-tab active" id="tab-upload" data-view="view-upload">Upload Extractor</button>
+                <button class="nav-tab" id="tab-history" data-view="view-history">Extraction History</button>
+                <button class="nav-tab" id="tab-constellation" data-view="view-constellation">Outfit Constellation</button>
+            </nav>
+        </header>
+
+        <main class="app-main">
+            <!-- View: Upload / Extract -->
+            <section id="view-upload" class="view-section active">
+                <div class="free-tier-banner glass-card" id="free-tier-warn">
+                    <div class="banner-icon"><i data-lucide="alert-triangle"></i></div>
+                    <div class="banner-text">
+                        <strong>Free Tier Notice:</strong> Your configured environment is using Google's Free Gemini API Tier. Content may be processed to improve products. For complete confidentiality, use a Paid Tier API key.
+                    </div>
+                    <button class="banner-close" id="btn-close-banner" aria-label="Dismiss banner">&times;</button>
+                </div>
+
+                <div class="grid-layout">
+                    <!-- Control Panel Card -->
+                    <div class="glass-card panel-card">
+                        <h2>Extraction Settings</h2>
+                        <form id="extract-form">
+                            <div class="form-group">
+                                <label for="model-select">Target Model</label>
+                                <select id="model-select" name="model" class="custom-select">
+                                    <option value="gemini-3.1-flash-lite" selected>gemini-3.1-flash-lite (Recommended)</option>
+                                    <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite</option>
+                                    <option value="gemini-2.5-flash">gemini-2.5-flash</option>
+                                </select>
+                            </div>
+
+                            <div class="drop-zone" id="drop-zone">
+                                <span class="drop-icon"><i data-lucide="upload-cloud"></i></span>
+                                <span class="drop-text">Drag & Drop video files here or <span class="browse-link">browse</span></span>
+                                <div class="file-name-display" id="file-name-display"></div>
+                            </div>
+                            <input type="file" id="video-input" name="video" accept="video/*" multiple style="display: none;">
+
+                            <div class="batch-queue-container" id="batch-queue-container" style="display: none; margin-top: 1.25rem;">
+                                <h4 style="font-size: 0.75rem; color: rgba(255, 255, 255, 0.6); margin-bottom: 0.5rem; text-transform: uppercase; letter-spacing: 0.05em;">Upload Queue</h4>
+                                <div class="batch-queue-list" id="batch-queue-list">
+                                    <!-- Dynamic queue items -->
+                                </div>
+                            </div>
+
+                            <div class="checkbox-group">
+                                <label class="checkbox-container">
+                                    <input type="checkbox" id="minor-possible" name="minor_possible">
+                                    <span class="checkbox-checkmark"></span>
+                                    Footage may contain minors (Safety Abort)
+                                </label>
+                                <label class="checkbox-container">
+                                    <input type="checkbox" id="dry-run" name="dry_run">
+                                    <span class="checkbox-checkmark"></span>
+                                    Dry run (Cost & Token Estimation Only)
+                                </label>
+                            </div>
+
+                            <div class="form-group batch-config-bar" style="margin-top: 1.25rem;">
+                                <label for="batch-delay-input" style="font-size: 0.75rem; color: rgba(255, 255, 255, 0.6); display: flex; justify-content: space-between; align-items: center;">
+                                    <span>Interval between batch files:</span>
+                                    <span id="batch-delay-val" style="font-weight: 600; color: #3b82f6;">10s</span>
+                                </label>
+                                <input type="range" id="batch-delay-input" min="2" max="60" value="10" class="custom-slider" style="width: 100%; margin-top: 0.25rem;">
+                            </div>
+
+                            <button type="submit" class="btn-primary" id="btn-submit" disabled style="margin-top: 1.25rem;">Start Extraction</button>
+                        </form>
+                    </div>
+
+                    <!-- Progress / Current Result Card -->
+                    <div class="glass-card result-panel">
+                        <h2>Current Status / Results</h2>
+                        
+                        <!-- Empty State -->
+                        <div id="state-idle" class="panel-state active">
+                            <span class="state-icon"><i data-lucide="inbox"></i></span>
+                            <p>Upload a video and configure settings to start extraction.</p>
+                        </div>
+
+                        <!-- Processing State -->
+                        <div id="state-processing" class="panel-state">
+                            <div class="spinner"></div>
+                            <h3 id="processing-title">Analyzing Video...</h3>
+                            <p class="processing-detail" id="processing-detail">Uploading file via File API and querying Gemini. Please do not close this window.</p>
+                            
+                            <div class="batch-progress-container" id="batch-progress-container" style="display: none; margin-top: 1rem; width: 100%;">
+                                <div class="batch-progress-text" style="font-size: 0.75rem; display: flex; justify-content: space-between; margin-bottom: 0.25rem; font-family: var(--font-mono);">
+                                    <span id="batch-progress-status">Uploading item 1 of 5</span>
+                                    <span id="batch-progress-percent">20%</span>
+                                </div>
+                                <div class="progress-bar-container">
+                                    <div class="progress-bar-fill" id="batch-progress-bar-fill" style="width: 0%; height: 100%; background: linear-gradient(90deg, #3b82f6, #0d9488); border-radius: 4px; transition: width 0.3s ease;"></div>
+                                </div>
+                            </div>
+
+                            <div class="progress-bar-container" id="single-progress-bar-container" style="width: 100%; margin-top: 1rem;">
+                                <div class="progress-bar-shimmer"></div>
+                            </div>
+                            
+                            <button type="button" class="btn-danger" id="btn-abort-batch" style="display: none; margin-top: 1.5rem; width: 100%;">Abort Queue</button>
+                        </div>
+
+                        <!-- Result Display State -->
+                        <div id="state-result" class="panel-state">
+                            <div class="result-header">
+                                <span class="status-badge success" id="result-status">Success</span>
+                                <h3 id="result-title">attributes_extracted.json</h3>
+                            </div>
+
+                            <!-- People Cards Container -->
+                            <div class="people-cards" id="result-people-container">
+                                <!-- Dynamically generated card list -->
+                            </div>
+
+                            <!-- Metadata details -->
+                            <div class="metadata-box" id="result-metadata">
+                                <!-- Dynamically populated metadata -->
+                            </div>
+                        </div>
+
+                        <!-- Error State -->
+                        <div id="state-error" class="panel-state">
+                            <span class="state-icon error-icon"><i data-lucide="x-circle"></i></span>
+                            <h3 id="error-title">Extraction Failed</h3>
+                            <p id="error-message">An error message will be printed here.</p>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- View: History -->
+            <section id="view-history" class="view-section">
+                <div class="glass-card history-card">
+                    <div class="history-header">
+                        <h2>Run History</h2>
+                        <button class="btn-secondary" id="btn-refresh-history">
+                            <i data-lucide="refresh-cw"></i> Refresh
+                        </button>
+                    </div>
+
+                    <div class="history-grid-container">
+                        <div class="history-grid" id="history-grid">
+                            <!-- Dynamic history cards generated by app.js -->
+                        </div>
+                    </div>
+                </div>
+
+                <!-- History detail modal -->
+                <div id="history-detail-modal" class="history-modal">
+                    <div class="glass-card history-modal-content">
+                        <div class="history-modal-header">
+                            <h2 id="modal-run-title">Run Details</h2>
+                            <button class="btn-close-modal" id="btn-close-modal">&times;</button>
+                        </div>
+                        <div class="history-modal-body">
+                            <div class="people-cards" id="modal-people-container"></div>
+                            <div class="metadata-box" id="modal-metadata"></div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <!-- View: Outfit Constellation -->
+            <section id="view-constellation" class="view-section">
+                <div class="glass-card constellation-card">
+                    <div class="constellation-header">
+                        <div class="constellation-title-group">
+                            <h2>Outfit Constellation Map</h2>
+                            <span class="constellation-subtitle">Proximity represents visual outfit similarity. Nearby dots share matching clothes.</span>
+                        </div>
+                        <div class="filter-toggle-bar">
+                            <button class="filter-toggle-btn active" data-mode="full">Full Outfit</button>
+                            <button class="filter-toggle-btn" data-mode="clothing">Clothing Only</button>
+                            <button class="filter-toggle-btn" data-mode="top">Top Only</button>
+                            <button class="filter-toggle-btn" data-mode="bottom">Bottom Only</button>
+                        </div>
+                    </div>
+
+                    <div class="constellation-canvas-container" id="canvas-container">
+                        <canvas id="constellation-canvas"></canvas>
+                        
+                        <!-- Floating Tooltip -->
+                        <div class="constellation-tooltip" id="constellation-tooltip"></div>
+                        
+                        <!-- Slide-in Detail Panel -->
+                        <div class="constellation-detail-panel glass-card" id="constellation-detail-panel">
+                            <button class="btn-close-panel" id="btn-close-constellation-panel">&times;</button>
+                            <div class="panel-section">
+                                <h3 id="constellation-panel-video">video_file.mp4</h3>
+                                <span class="person-tag" id="constellation-panel-label">person_1</span>
+                            </div>
+                            <div class="panel-section" style="border-bottom: 1px solid var(--glass-border); padding-bottom: 0.75rem; margin-bottom: 0.75rem;">
+                                <h4>Styling Parameters</h4>
+                                <div class="people-cards" id="constellation-panel-attributes" style="grid-template-columns: 1fr; gap: 0.5rem; max-height: 180px; overflow-y: auto;"></div>
+                            </div>
+                            <div class="panel-section">
+                                <h4>Closest Matches in Database</h4>
+                                <div class="similar-matches-list" id="constellation-panel-similar" style="display: flex; flex-direction: column; gap: 0.5rem; max-height: 220px; overflow-y: auto;">
+                                    <!-- Populated dynamically -->
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="constellation-footer">
+                        <div class="constellation-legend">
+                            <span class="legend-item"><span class="legend-dot" style="background: #ef4444; box-shadow: 0 0 8px #ef4444;"></span> Red/Pink</span>
+                            <span class="legend-item"><span class="legend-dot" style="background: #3b82f6; box-shadow: 0 0 8px #3b82f6;"></span> Blue/Navy</span>
+                            <span class="legend-item"><span class="legend-dot" style="background: #10b981; box-shadow: 0 0 8px #10b981;"></span> Green/Olive</span>
+                            <span class="legend-item"><span class="legend-dot" style="background: #f59e0b; box-shadow: 0 0 8px #f59e0b;"></span> Amber/Yellow</span>
+                            <span class="legend-item"><span class="legend-dot" style="background: #ffffff; box-shadow: 0 0 8px #ffffff;"></span> White/Light</span>
+                            <span class="legend-item"><span class="legend-dot" style="background: #1e293b; box-shadow: 0 0 8px #1e293b; border: 1px solid rgba(255,255,255,0.2);"></span> Black/Dark</span>
+                        </div>
+                        <button class="btn-secondary" id="btn-reembed-all">
+                            <i data-lucide="refresh-cw"></i> Re-embed All History
+                        </button>
+                    </div>
+                </div>
+            </section>
+        </main>
+        
+        <footer class="app-footer">
+            <p>Wovely CV System • Powered by Google Gemini</p>
+        </footer>
+    </div>
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
