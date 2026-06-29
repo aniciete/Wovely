@@ -443,13 +443,122 @@ def classical_mds(D: np.ndarray, dimensions: int = 2) -> np.ndarray:
     return coords
 
 def compute_constellation_coords(db_path: str, mode: str = "full") -> List[Dict[str, Any]]:
-    """Calculates coordinates for the 2D outfit constellation map via classical MDS."""
+    """Calculates coordinates for the 2D outfit constellation map via classical MDS, using cache if valid."""
+    from database import get_db_connection
+    
+    # 1. Get total people count and verify cache validity
     people = get_all_people_with_attributes(db_path)
     n = len(people)
     if n == 0:
         return []
-        
-    # 1. Compute Pairwise Distance Matrix (D[i,j] = 1 - sim[i,j])
+
+    # Check cache count
+    cached_count = 0
+    try:
+        with get_db_connection(db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT COUNT(*) as cnt 
+                FROM constellation_cache 
+                WHERE mode = ? 
+                  AND person_id IN (SELECT id FROM people)
+                """,
+                (mode,)
+            )
+            row = cursor.fetchone()
+            if row:
+                cached_count = row["cnt"]
+    except Exception as e:
+        print(f"Warning: Failed to check constellation cache validity: {e}", file=sys.stderr)
+
+    if cached_count == n:
+        # Cache is valid! Fetch directly from cache joining with metadata
+        try:
+            with get_db_connection(db_path) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT 
+                        p.id as person_id,
+                        p.run_id,
+                        r.source_video,
+                        p.person_label,
+                        r.created_at,
+                        c.x,
+                        c.y,
+                        p.top_type, p.top_color, p.top_fit, p.top_fabric, p.top_pattern, p.top_neckline, p.top_sleeve_length, p.top_details,
+                        p.bottom_type, p.bottom_color, p.bottom_fit, p.bottom_fabric, p.bottom_pattern, p.bottom_garment_length, p.bottom_details,
+                        p.hair_color, p.hair_texture, p.hair_length, p.hair_style
+                    FROM constellation_cache c
+                    JOIN people p ON c.person_id = p.id
+                    JOIN runs r ON p.run_id = r.id
+                    WHERE c.mode = ?
+                    """,
+                    (mode,)
+                )
+                rows = cursor.fetchall()
+                
+                points = []
+                for row in rows:
+                    p = dict(row)
+                    
+                    # Reconstruct models for helpers
+                    top = {
+                        "type": p["top_type"],
+                        "color": p["top_color"],
+                        "fit": p["top_fit"],
+                        "fabric": p["top_fabric"],
+                        "pattern": p["top_pattern"],
+                        "neckline": p["top_neckline"],
+                        "sleeve_length": p["top_sleeve_length"],
+                        "details": json.loads(p["top_details"]) if p["top_details"] else []
+                    }
+                    bottom = {
+                        "type": p["bottom_type"],
+                        "color": p["bottom_color"],
+                        "fit": p["bottom_fit"],
+                        "fabric": p["bottom_fabric"],
+                        "pattern": p["bottom_pattern"],
+                        "garment_length": p["bottom_garment_length"],
+                        "details": json.loads(p["bottom_details"]) if p["bottom_details"] else []
+                    }
+                    hair = {
+                        "color": p["hair_color"],
+                        "texture": p["hair_texture"],
+                        "length": p["hair_length"],
+                        "style": p["hair_style"]
+                    }
+                    
+                    top_desc = compose_top_text(top)
+                    bot_desc = compose_bottom_text(bottom)
+                    summary = ""
+                    if top_desc and bot_desc:
+                        summary = f"{top_desc} & {bot_desc}"
+                    elif top_desc:
+                        summary = top_desc
+                    elif bot_desc:
+                        summary = bot_desc
+                    else:
+                        summary = "No visible clothing detected"
+                        
+                    points.append({
+                        "person_id": p["person_id"],
+                        "run_id": p["run_id"],
+                        "source_video": p["source_video"],
+                        "person_label": p["person_label"],
+                        "created_at": p["created_at"],
+                        "x": p["x"],
+                        "y": p["y"],
+                        "summary": summary,
+                        "dominant_color": p["top_color"] or p["bottom_color"] or "gray",
+                        "hair_summary": compose_hair_text(hair) or "hair not visible"
+                    })
+                return points
+        except Exception as e:
+            print(f"Warning: Failed to load from constellation cache, falling back to calculation: {e}", file=sys.stderr)
+
+    # 2. Cache is invalid/missing: Compute pairwise distances
     D = np.zeros((n, n))
     for i in range(n):
         for j in range(i, n):
@@ -461,10 +570,26 @@ def compute_constellation_coords(db_path: str, mode: str = "full") -> List[Dict[
                 D[i, j] = dist
                 D[j, i] = dist
                 
-    # 2. Run MDS to project to 2D
+    # 3. Project to 2D via MDS
     coords = classical_mds(D, dimensions=2)
     
-    # 3. Format results with point styling helpers
+    # 4. Save to cache
+    try:
+        with get_db_connection(db_path) as conn:
+            conn.execute("DELETE FROM constellation_cache WHERE mode = ?", (mode,))
+            for i, p in enumerate(people):
+                conn.execute(
+                    """
+                    INSERT INTO constellation_cache (mode, person_id, x, y)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (mode, p["person_id"], float(coords[i, 0]), float(coords[i, 1]))
+                )
+            conn.commit()
+    except Exception as e:
+        print(f"Warning: Failed to save to constellation cache: {e}", file=sys.stderr)
+
+    # 5. Format results
     points = []
     for i, p in enumerate(people):
         top_color = p.get("top", {}).get("color")
@@ -497,3 +622,17 @@ def compute_constellation_coords(db_path: str, mode: str = "full") -> List[Dict[
         })
         
     return points
+
+def warm_constellation_cache_async(db_path: str) -> None:
+    """Spawns a daemon thread to compute and cache coordinates for all modes in the background."""
+    import threading
+    def task():
+        for mode in ["full", "clothing", "top", "bottom"]:
+            try:
+                compute_constellation_coords(db_path, mode=mode)
+            except Exception as e:
+                print(f"Error warming constellation cache for mode '{mode}': {e}", file=sys.stderr)
+                
+    thread = threading.Thread(target=task)
+    thread.daemon = True
+    thread.start()

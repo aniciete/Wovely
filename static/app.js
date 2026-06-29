@@ -59,6 +59,7 @@ document.addEventListener("DOMContentLoaded", () => {
     let currentBatchIndex = 0;
     let abortController = null;
     let listHoveredPoint = null;
+    let activePollInterval = null;
 
     // --- Tab Switching Navigation ---
     navTabs.forEach(tab => {
@@ -268,16 +269,111 @@ document.addEventListener("DOMContentLoaded", () => {
         });
     }
 
+    function pollRunStatus(runId, onSuccess, onFailure) {
+        const pollInterval = setInterval(() => {
+            fetch(`/api/runs/${runId}`)
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error("Failed to check status");
+                }
+                return response.json();
+            })
+            .then(data => {
+                if (data.status === "processing") {
+                    return;
+                }
+                
+                clearInterval(pollInterval);
+                activePollInterval = null;
+                
+                if (data.status === "failed") {
+                    onFailure(new Error(data.error || "Processing failed."));
+                } else if (data.status === "dry_run") {
+                    // Clean up dry run from database history
+                    fetch(`/api/runs/${runId}`, { method: "DELETE" })
+                    .catch(err => console.error("Failed to delete dry run:", err));
+                    
+                    let resultData = data;
+                    if (data.raw_json) {
+                        try {
+                            resultData = JSON.parse(data.raw_json);
+                        } catch (e) {}
+                    }
+                    onSuccess(resultData);
+                } else {
+                    let resultData = data;
+                    if (data.raw_json) {
+                        try {
+                            resultData = JSON.parse(data.raw_json);
+                            resultData.db_id = runId;
+                        } catch (e) {}
+                    }
+                    onSuccess(resultData);
+                }
+            })
+            .catch(err => {
+                clearInterval(pollInterval);
+                activePollInterval = null;
+                onFailure(err);
+            });
+        }, 2000);
+        
+        return pollInterval;
+    }
+
+    function uploadSingleFile(file) {
+        const formData = new FormData(extractForm);
+        formData.set("video", file);
+        formData.set("dry_run", document.getElementById("dry-run").checked);
+        formData.set("minor_possible", document.getElementById("minor-possible").checked);
+
+        if (activePollInterval) {
+            clearInterval(activePollInterval);
+            activePollInterval = null;
+        }
+
+        fetch("/api/extract", {
+            method: "POST",
+            body: formData
+        })
+        .then(response => {
+            if (!response.ok) {
+                return response.json().then(err => { throw new Error(err.error || "Server processing failed") });
+            }
+            return response.json();
+        })
+        .then(data => {
+            if (data.status === "processing") {
+                activePollInterval = pollRunStatus(
+                    data.run_id,
+                    (result) => {
+                        renderResult(result);
+                        switchResultState("result");
+                    },
+                    (err) => {
+                        errorMessage.textContent = err.message;
+                        switchResultState("error");
+                    }
+                );
+            } else {
+                renderResult(data);
+                switchResultState("result");
+            }
+        })
+        .catch(err => {
+            errorMessage.textContent = err.message;
+            switchResultState("error");
+        });
+    }
+
     function processNextBatchItem() {
         if (!isBatchActive) return;
         
         if (currentBatchIndex >= selectedFiles.length) {
-            // Batch complete!
             alert(`Batch extraction completed successfully! Processed ${selectedFiles.length} files.`);
             isBatchActive = false;
             switchResultState("idle");
             
-            // Reset state
             selectedFiles = [];
             fileNameDisplay.textContent = "";
             batchQueueContainer.style.display = "none";
@@ -289,7 +385,6 @@ document.addEventListener("DOMContentLoaded", () => {
         const total = selectedFiles.length;
         const progressPct = Math.round((currentBatchIndex / total) * 100);
         
-        // Update batch progress display
         batchProgressStatus.textContent = `Processing file ${currentBatchIndex + 1} of ${total}`;
         batchProgressPercent.textContent = `${progressPct}%`;
         batchProgressBarFill.style.width = `${progressPct}%`;
@@ -301,6 +396,11 @@ document.addEventListener("DOMContentLoaded", () => {
         formData.set("video", file);
         formData.set("dry_run", document.getElementById("dry-run").checked);
         formData.set("minor_possible", document.getElementById("minor-possible").checked);
+
+        if (activePollInterval) {
+            clearInterval(activePollInterval);
+            activePollInterval = null;
+        }
 
         fetch("/api/extract", {
             method: "POST",
@@ -314,34 +414,24 @@ document.addEventListener("DOMContentLoaded", () => {
             return response.json();
         })
         .then(data => {
-            updateQueueItemStatus(currentBatchIndex, "success", "Success");
-            
-            // Render the last successful extraction result to screen
-            renderResult(data);
-            
-            currentBatchIndex++;
-            
-            if (isBatchActive && currentBatchIndex < total) {
-                const delaySec = parseInt(batchDelayInput.value) || 10;
-                let remaining = delaySec;
-                
-                const countdownInterval = setInterval(() => {
-                    if (!isBatchActive) {
-                        clearInterval(countdownInterval);
-                        return;
+            if (data.status === "processing") {
+                activePollInterval = pollRunStatus(
+                    data.run_id,
+                    (result) => {
+                        updateQueueItemStatus(currentBatchIndex, "success", "Success");
+                        renderResult(result);
+                        proceedAfterBatchItem();
+                    },
+                    (err) => {
+                        updateQueueItemStatus(currentBatchIndex, "failed", "Failed");
+                        console.error(`Batch item failed: ${file.name}`, err);
+                        proceedAfterBatchItem();
                     }
-                    remaining--;
-                    if (remaining <= 0) {
-                        clearInterval(countdownInterval);
-                        processNextBatchItem();
-                    } else {
-                        processingDetail.textContent = `Waiting ${remaining}s before starting next file...`;
-                    }
-                }, 1000);
-                
-                processingDetail.textContent = `Waiting ${remaining}s before starting next file...`;
+                );
             } else {
-                processNextBatchItem();
+                updateQueueItemStatus(currentBatchIndex, "success", "Success");
+                renderResult(data);
+                proceedAfterBatchItem();
             }
         })
         .catch(err => {
@@ -352,6 +442,10 @@ document.addEventListener("DOMContentLoaded", () => {
             updateQueueItemStatus(currentBatchIndex, "failed", "Failed");
             console.error(`Batch item failed: ${file.name}`, err);
             
+            proceedAfterBatchItem();
+        });
+
+        function proceedAfterBatchItem() {
             currentBatchIndex++;
             
             if (isBatchActive && currentBatchIndex < total) {
@@ -376,7 +470,7 @@ document.addEventListener("DOMContentLoaded", () => {
             } else {
                 processNextBatchItem();
             }
-        });
+        }
     }
 
     if (btnAbortBatch) {
@@ -384,6 +478,10 @@ document.addEventListener("DOMContentLoaded", () => {
             if (!confirm("Are you sure you want to abort the current batch extraction queue? Unprocessed files will be skipped.")) return;
             
             isBatchActive = false;
+            if (activePollInterval) {
+                clearInterval(activePollInterval);
+                activePollInterval = null;
+            }
             if (abortController) {
                 abortController.abort();
             }

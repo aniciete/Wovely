@@ -116,6 +116,18 @@ def init_db(db_path: str) -> None:
             );
         """)
         
+        # Create constellation_cache table
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS constellation_cache (
+                mode        TEXT NOT NULL,
+                person_id   INTEGER NOT NULL REFERENCES people(id) ON DELETE CASCADE,
+                x           REAL NOT NULL,
+                y           REAL NOT NULL,
+                updated_at  TEXT NOT NULL DEFAULT (datetime('now')),
+                PRIMARY KEY (mode, person_id)
+            );
+        """)
+        
         # Run migrations on existing db to keep it up to date
         migrate_db(conn)
         conn.commit()
@@ -224,6 +236,137 @@ def save_run(db_path: str, result: Dict[str, Any]) -> int:
         conn.commit()
         return run_id
 
+def create_placeholder_run(db_path: str, source_video: str, model: str) -> int:
+    """Saves a placeholder run record with status='processing' and returns the run_id."""
+    with get_db_connection(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO runs (
+                source_video, model, status, duration_sec, 
+                input_tokens, output_tokens, est_cost_usd, 
+                chunks_total, chunks_skipped, raw_json
+            ) VALUES (?, ?, 'processing', 0.0, 0, 0, 0.0, 0, 0, NULL)
+            """,
+            (source_video, model)
+        )
+        conn.commit()
+        run_id = cursor.lastrowid
+        if not run_id:
+            raise RuntimeError("Failed to insert placeholder run.")
+        return run_id
+
+def update_run_failed(db_path: str, run_id: int, error_msg: str) -> None:
+    """Updates an existing run record to status='failed' with error info in raw_json."""
+    with get_db_connection(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            UPDATE runs
+            SET status = 'failed', raw_json = ?
+            WHERE id = ?
+            """,
+            (json.dumps({"error": error_msg}), run_id)
+        )
+        conn.commit()
+
+def update_run_success(db_path: str, run_id: int, result: Dict[str, Any]) -> None:
+    """Updates an existing run to success/ok status, saving run metadata and detected people."""
+    with get_db_connection(db_path) as conn:
+        cursor = conn.cursor()
+        
+        # Calculate summaries from chunks
+        chunks = result.get("chunks", [])
+        chunks_total = len(chunks)
+        chunks_skipped = sum(1 for c in chunks if c.get("status") != "ok")
+        
+        duration_sec = 0.0
+        if chunks:
+            time_range = chunks[-1].get("time_range_seconds", [0.0, 0.0])
+            if len(time_range) == 2:
+                duration_sec = time_range[1]
+
+        metadata = result.get("run_metadata", {})
+        input_tokens = metadata.get("total_input_tokens", 0)
+        output_tokens = metadata.get("total_output_tokens", 0)
+        est_cost_usd = metadata.get("estimated_cost_usd", 0.0)
+
+        # Clear existing people just in case
+        cursor.execute("DELETE FROM people WHERE run_id = ?", (run_id,))
+
+        cursor.execute(
+            """
+            UPDATE runs
+            SET status = ?, duration_sec = ?, input_tokens = ?, 
+                output_tokens = ?, est_cost_usd = ?, 
+                chunks_total = ?, chunks_skipped = ?, raw_json = ?
+            WHERE id = ?
+            """,
+            (
+                chunks[0].get("status", "ok") if chunks else "ok",
+                duration_sec,
+                input_tokens,
+                output_tokens,
+                est_cost_usd,
+                chunks_total,
+                chunks_skipped,
+                json.dumps(result),
+                run_id
+            )
+        )
+
+        # Save people from chunks
+        for chunk in chunks:
+            chunk_idx = chunk.get("chunk_index", 0)
+            for person in chunk.get("people", []):
+                hair = person.get("hair") or {}
+                top = person.get("top") or {}
+                bottom = person.get("bottom") or {}
+                
+                hair_color = hair.get("color") if isinstance(hair, dict) else person.get("hair_color")
+                hair_texture = hair.get("texture") if isinstance(hair, dict) else None
+                hair_length = hair.get("length") if isinstance(hair, dict) else None
+                hair_style = hair.get("style") if isinstance(hair, dict) else None
+
+                top_details_str = json.dumps(top.get("details", [])) if isinstance(top, dict) else "[]"
+                bottom_details_str = json.dumps(bottom.get("details", [])) if isinstance(bottom, dict) else "[]"
+                
+                cursor.execute(
+                    """
+                    INSERT INTO people (
+                        run_id, chunk_index, person_label, 
+                        hair_color, hair_texture, hair_length, hair_style,
+                        top_type, top_color, top_fit, top_fabric, top_pattern, top_neckline, top_sleeve_length, top_details,
+                        bottom_type, bottom_color, bottom_fit, bottom_fabric, bottom_pattern, bottom_garment_length, bottom_details
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        run_id,
+                        chunk_idx,
+                        person.get("person_label", ""),
+                        hair_color,
+                        hair_texture,
+                        hair_length,
+                        hair_style,
+                        top.get("type") if isinstance(top, dict) else None,
+                        top.get("color") if isinstance(top, dict) else None,
+                        top.get("fit") if isinstance(top, dict) else None,
+                        top.get("fabric") if isinstance(top, dict) else None,
+                        top.get("pattern") if isinstance(top, dict) else None,
+                        top.get("neckline") if isinstance(top, dict) else None,
+                        top.get("sleeve_length") if isinstance(top, dict) else None,
+                        top_details_str,
+                        bottom.get("type") if isinstance(bottom, dict) else None,
+                        bottom.get("color") if isinstance(bottom, dict) else None,
+                        bottom.get("fit") if isinstance(bottom, dict) else None,
+                        bottom.get("fabric") if isinstance(bottom, dict) else None,
+                        bottom.get("pattern") if isinstance(bottom, dict) else None,
+                        bottom.get("garment_length") if isinstance(bottom, dict) else None,
+                        bottom_details_str
+                    )
+                )
+        conn.commit()
+
 def get_all_runs(db_path: str) -> List[Dict[str, Any]]:
     """Returns a list of all runs, ordered by most recent first."""
     with get_db_connection(db_path) as conn:
@@ -259,13 +402,13 @@ def get_run_detail(db_path: str, run_id: int) -> Optional[Dict[str, Any]]:
         for p in people_rows:
             # Parse details lists
             top_details = []
-            if "top_details" in p.keys() and p["top_details"]:
+            if p["top_details"]:
                 try:
                     top_details = json.loads(p["top_details"])
                 except Exception:
                     pass
             bottom_details = []
-            if "bottom_details" in p.keys() and p["bottom_details"]:
+            if p["bottom_details"]:
                 try:
                     bottom_details = json.loads(p["bottom_details"])
                 except Exception:
@@ -276,27 +419,27 @@ def get_run_detail(db_path: str, run_id: int) -> Optional[Dict[str, Any]]:
                 "person_label": p["person_label"],
                 "hair": {
                     "color": p["hair_color"],
-                    "texture": p["hair_texture"] if "hair_texture" in p.keys() else None,
-                    "length": p["hair_length"] if "hair_length" in p.keys() else None,
-                    "style": p["hair_style"] if "hair_style" in p.keys() else None
+                    "texture": p["hair_texture"],
+                    "length": p["hair_length"],
+                    "style": p["hair_style"]
                 },
                 "top": {
                     "type": p["top_type"],
                     "color": p["top_color"],
-                    "fit": p["top_fit"] if "top_fit" in p.keys() else None,
-                    "fabric": p["top_fabric"] if "top_fabric" in p.keys() else None,
-                    "pattern": p["top_pattern"] if "top_pattern" in p.keys() else None,
-                    "neckline": p["top_neckline"] if "top_neckline" in p.keys() else None,
-                    "sleeve_length": p["top_sleeve_length"] if "top_sleeve_length" in p.keys() else None,
+                    "fit": p["top_fit"],
+                    "fabric": p["top_fabric"],
+                    "pattern": p["top_pattern"],
+                    "neckline": p["top_neckline"],
+                    "sleeve_length": p["top_sleeve_length"],
                     "details": top_details
                 },
                 "bottom": {
                     "type": p["bottom_type"],
                     "color": p["bottom_color"],
-                    "fit": p["bottom_fit"] if "bottom_fit" in p.keys() else None,
-                    "fabric": p["bottom_fabric"] if "bottom_fabric" in p.keys() else None,
-                    "pattern": p["bottom_pattern"] if "bottom_pattern" in p.keys() else None,
-                    "garment_length": p["bottom_garment_length"] if "bottom_garment_length" in p.keys() else None,
+                    "fit": p["bottom_fit"],
+                    "fabric": p["bottom_fabric"],
+                    "pattern": p["bottom_pattern"],
+                    "garment_length": p["bottom_garment_length"],
                     "details": bottom_details
                 }
             })
@@ -351,14 +494,15 @@ def get_all_people_with_attributes(db_path: str) -> List[Dict[str, Any]]:
         
         people_list = []
         for p in rows:
+            # Parse details lists
             top_details = []
-            if "top_details" in p.keys() and p["top_details"]:
+            if p["top_details"]:
                 try:
                     top_details = json.loads(p["top_details"])
                 except Exception:
                     pass
             bottom_details = []
-            if "bottom_details" in p.keys() and p["bottom_details"]:
+            if p["bottom_details"]:
                 try:
                     bottom_details = json.loads(p["bottom_details"])
                 except Exception:
@@ -374,27 +518,27 @@ def get_all_people_with_attributes(db_path: str) -> List[Dict[str, Any]]:
                 "person_label": p["person_label"],
                 "hair": {
                     "color": p["hair_color"],
-                    "texture": p["hair_texture"] if "hair_texture" in p.keys() else None,
-                    "length": p["hair_length"] if "hair_length" in p.keys() else None,
-                    "style": p["hair_style"] if "hair_style" in p.keys() else None
+                    "texture": p["hair_texture"],
+                    "length": p["hair_length"],
+                    "style": p["hair_style"]
                 },
                 "top": {
                     "type": p["top_type"],
                     "color": p["top_color"],
-                    "fit": p["top_fit"] if "top_fit" in p.keys() else None,
-                    "fabric": p["top_fabric"] if "top_fabric" in p.keys() else None,
-                    "pattern": p["top_pattern"] if "top_pattern" in p.keys() else None,
-                    "neckline": p["top_neckline"] if "top_neckline" in p.keys() else None,
-                    "sleeve_length": p["top_sleeve_length"] if "top_sleeve_length" in p.keys() else None,
+                    "fit": p["top_fit"],
+                    "fabric": p["top_fabric"],
+                    "pattern": p["top_pattern"],
+                    "neckline": p["top_neckline"],
+                    "sleeve_length": p["top_sleeve_length"],
                     "details": top_details
                 },
                 "bottom": {
                     "type": p["bottom_type"],
                     "color": p["bottom_color"],
-                    "fit": p["bottom_fit"] if "bottom_fit" in p.keys() else None,
-                    "fabric": p["bottom_fabric"] if "bottom_fabric" in p.keys() else None,
-                    "pattern": p["bottom_pattern"] if "bottom_pattern" in p.keys() else None,
-                    "garment_length": p["bottom_garment_length"] if "bottom_garment_length" in p.keys() else None,
+                    "fit": p["bottom_fit"],
+                    "fabric": p["bottom_fabric"],
+                    "pattern": p["bottom_pattern"],
+                    "garment_length": p["bottom_garment_length"],
                     "details": bottom_details
                 }
             })
