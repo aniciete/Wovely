@@ -2,3 +2,6 @@ google-genai
 pydantic
 python-dotenv
 flask
+numpy
+opencv-python
+requests
