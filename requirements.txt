@@ -5,3 +5,4 @@ flask
 numpy
 opencv-python
 requests
+pyexiftool>=0.5.0

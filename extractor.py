@@ -7,6 +7,7 @@ import json
 import time
 from typing import Optional, List, Tuple
 from pydantic import BaseModel, Field
+from google.genai.errors import APIError
 
 # Load environment variables from .env file if available
 try:
@@ -91,10 +92,24 @@ class PersonAttributes(BaseModel):
         description="Attributes of the bottom garment."
     )
 
+class PlatformMetadata(BaseModel):
+    platform: Optional[str] = Field(
+        default=None, 
+        description="The social media platform detected via watermark (e.g., 'TikTok', 'Instagram', 'YouTube Shorts'). Set to null if none."
+    )
+    handle: Optional[str] = Field(
+        default=None, 
+        description="The creator @username or channel handle visible in the watermark or UI overlay. Set to null if not present."
+    )
+
 class ChunkResult(BaseModel):
     people: List[PersonAttributes] = Field(
         default_factory=list,
         description="List of detected people and their clothing/hair attributes."
+    )
+    platform_metadata: Optional[PlatformMetadata] = Field(
+        default=None,
+        description="Social media platform identifiers extracted from video watermarks."
     )
 
 # Constants
@@ -129,8 +144,12 @@ PROMPT_TEXT = (
     "   - pattern: fabric pattern (e.g., 'solid', 'striped', 'plaid')\n"
     "   - garment_length: length scale (e.g., 'mini', 'midi', 'maxi', 'ankle', 'cropped')\n"
     "   - details: list of details (e.g., ['distressed', 'high-waisted', 'cargo pockets', 'pleated'])\n\n"
+    "4. PLATFORM METADATA (Watermark Detection):\n"
+    "   - platform: Identify the social media platform if a watermark is present (e.g., 'TikTok', 'Instagram', 'YouTube Shorts'). Set to null if no watermark.\n"
+    "   - handle: Extract the exact @username or creator handle visible in the watermark or UI overlay. Set to null if not present.\n\n"
     "Constraints:\n"
-    "- If a garment/attribute is not visible (out of frame, occluded, or not worn), set it to null. DO NOT guess.\n"
+    "- Continue to ignore bare skin, body shape, and backgrounds UNLESS they contain social media watermarks or usernames.\n"
+    "- If a garment/attribute or platform metadata is not visible (out of frame, occluded, or not worn/present), set it to null. DO NOT guess.\n"
     "- Do not describe or comment on bare skin, body shape, or nudity. Only report garments that are actually present. "
     "If a person is not wearing topwear or bottomwear, report that garment object fields as null; never describe bare skin.\n"
     "- Assign each person a stable label (e.g., 'person_1') consistently throughout this segment.\n\n"
@@ -149,9 +168,11 @@ def log_free_tier_warning() -> None:
           "and to prevent content training, use a paid billing tier key.", file=sys.stderr)
 
 def get_video_duration(video_path: str) -> float:
-    """Gets duration in seconds of a video file using OpenCV, falling back if unavailable."""
+    """Gets duration in seconds of a video file using OpenCV, falling back to pure-Python MP4 parsing if unavailable."""
     if not os.path.exists(video_path):
         return 0.0
+        
+    # 1. Try OpenCV
     try:
         import cv2
         cap = cv2.VideoCapture(video_path)
@@ -165,6 +186,27 @@ def get_video_duration(video_path: str) -> float:
             cap.release()
     except Exception:
         pass
+        
+    # 2. Try pure-Python binary parser fallback (for standard MP4/MOV files)
+    try:
+        with open(video_path, "rb") as f:
+            data = f.read(1024 * 1024)  # Read first 1MB containing header boxes
+            pos = data.find(b"mvhd")
+            if pos != -1:
+                version = data[pos + 4]
+                if version == 0:
+                    timescale = int.from_bytes(data[pos + 12 : pos + 16], "big")
+                    duration = int.from_bytes(data[pos + 16 : pos + 20], "big")
+                elif version == 1:
+                    timescale = int.from_bytes(data[pos + 20 : pos + 24], "big")
+                    duration = int.from_bytes(data[pos + 24 : pos + 32], "big")
+                else:
+                    return 0.0
+                if timescale > 0:
+                    return float(duration) / timescale
+    except Exception:
+        pass
+        
     return 0.0
 
 def calculate_estimated_cost(duration_seconds: float) -> Tuple[int, float]:
@@ -173,14 +215,57 @@ def calculate_estimated_cost(duration_seconds: float) -> Tuple[int, float]:
     estimated_cost = (estimated_tokens / 1_000_000) * PAID_INPUT_COST_PER_1M
     return estimated_tokens, estimated_cost
 
+def call_gemini_with_retry(client, model_name, uploaded_file, safety_settings, max_retries=4, initial_backoff=2.0):
+    """Wraps the generate_content call in an exponential backoff retry loop for transient 503 and 429 errors."""
+    import time
+    import random
+    from google.genai import types
+    from google.genai.errors import APIError
+    
+    attempt = 0
+    while True:
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=[uploaded_file, PROMPT_TEXT],
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=ChunkResult,
+                    safety_settings=safety_settings,
+                )
+            )
+            return response
+        except APIError as e:
+            code = getattr(e, "code", None)
+            message = getattr(e, "message", None) or str(e)
+            
+            is_transient = (code in (429, 503)) or ("503" in str(e)) or ("429" in str(e)) or ("unavailable" in str(e).lower()) or ("demand" in str(e).lower())
+            
+            if is_transient and attempt < max_retries:
+                attempt += 1
+                backoff = initial_backoff * (2 ** (attempt - 1))
+                jitter = random.random()
+                sleep_time = backoff + jitter
+                print(f"WARNING: Gemini API transient error ({code or '503'}): {message}. "
+                      f"Attempt {attempt}/{max_retries}. Retrying in {sleep_time:.2f} seconds...", file=sys.stderr)
+                time.sleep(sleep_time)
+            else:
+                raise
+
 def run_extraction(
     video_path: str,
     model_name: str,
     dry_run: bool = False,
-    minor_possible: bool = False
+    minor_possible: bool = False,
+    db_path: str = None,
+    run_id: int = None
 ) -> dict:
     # 1. Check safety constraint
     check_minor_safety(minor_possible)
+
+    if db_path and run_id:
+        import database
+        database.update_run_status_detail(db_path, run_id, "safety_check")
 
     # 2. Check file existence
     if not dry_run and not os.path.exists(video_path):
@@ -229,6 +314,9 @@ def run_extraction(
     ]
 
     print(f"Uploading {video_path} via File API...")
+    if db_path and run_id:
+        import database
+        database.update_run_status_detail(db_path, run_id, "uploading_to_gemini")
     try:
         uploaded_file = client.files.upload(file=video_path)
     except Exception as e:
@@ -254,6 +342,9 @@ def run_extraction(
         }
 
     print(f"File uploaded. Name: {uploaded_file.name}. Waiting for processing...")
+    if db_path and run_id:
+        import database
+        database.update_run_status_detail(db_path, run_id, "processing_on_gemini")
     try:
         state = getattr(uploaded_file, "state", None)
         while state and getattr(state, "name", str(state)) == "PROCESSING":
@@ -293,21 +384,22 @@ def run_extraction(
 
     # 6. Call model
     print(f"Querying model {model_name}...")
+    if db_path and run_id:
+        import database
+        database.update_run_status_detail(db_path, run_id, "querying_model")
     chunk_status = "ok"
     people_data = []
+    platform_meta_dict = None
     input_tokens = 0
     output_tokens = 0
     actual_cost = 0.0
 
     try:
-        response = client.models.generate_content(
-            model=model_name,
-            contents=[uploaded_file, PROMPT_TEXT],
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=ChunkResult,
-                safety_settings=safety_settings,
-            )
+        response = call_gemini_with_retry(
+            client=client,
+            model_name=model_name,
+            uploaded_file=uploaded_file,
+            safety_settings=safety_settings
         )
 
         # Extract tokens
@@ -339,6 +431,9 @@ def run_extraction(
             # Successful parse
             if response.parsed:
                 people_data = response.parsed.people
+                if getattr(response.parsed, "platform_metadata", None):
+                    pm = response.parsed.platform_metadata
+                    platform_meta_dict = pm.model_dump() if hasattr(pm, "model_dump") else pm.dict()
             else:
                 chunk_status = "parse_error"
                 print("WARNING: Response failed parsing to defined schema.", file=sys.stderr)
@@ -374,7 +469,8 @@ def run_extraction(
                 "chunk_index": 0,
                 "time_range_seconds": [0.0, duration],
                 "status": chunk_status,
-                "people": people_list
+                "people": people_list,
+                "platform_metadata": platform_meta_dict
             }
         ],
         "run_metadata": {

@@ -19,7 +19,7 @@ class TestExtractor(unittest.TestCase):
         """Verify prompt explicitly prohibits describing nudity/bare skin and requests nulls."""
         self.assertIn("Do not describe or comment on bare skin, body shape, or nudity", PROMPT_TEXT)
         self.assertIn("If a person is not wearing topwear or bottomwear, report that garment object fields as null; never describe bare skin", PROMPT_TEXT)
-        self.assertIn("If a garment/attribute is not visible (out of frame, occluded, or not worn), set it to null. DO NOT guess", PROMPT_TEXT)
+        self.assertIn("If a garment/attribute or platform metadata is not visible (out of frame, occluded, or not worn/present), set it to null. DO NOT guess", PROMPT_TEXT)
         # Verify no instructions ask for describing nudity or bare skin
         self.assertNotIn("describe nudity", PROMPT_TEXT.lower())
         self.assertNotIn("describe skin", PROMPT_TEXT.lower())
@@ -100,6 +100,40 @@ class TestExtractor(unittest.TestCase):
         warning_output = captured_stderr.getvalue()
         self.assertIn("WARNING: Running under the Google Gemini Free Tier", warning_output)
         self.assertIn("data privacy compliance", warning_output)
+
+    def test_gemini_api_retry_backoff(self):
+        """Verify call_gemini_with_retry performs backoff retries on transient errors and succeeds."""
+        from unittest.mock import patch, MagicMock
+        from google.genai.errors import APIError
+        from extractor import call_gemini_with_retry
+
+        # Create mock client and response
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.text = "success"
+
+        # Create a transient APIError
+        transient_error = APIError(code=503, response_json={"error": {"message": "Unavailable due to high demand"}})
+
+        # Set side effect: 2 failures followed by 1 success
+        mock_client.models.generate_content.side_effect = [
+            transient_error,
+            transient_error,
+            mock_response
+        ]
+
+        with patch("time.sleep", return_value=None) as mock_sleep:
+            result = call_gemini_with_retry(
+                client=mock_client,
+                model_name="gemini-3-flash-preview",
+                uploaded_file=MagicMock(),
+                safety_settings=None,
+                initial_backoff=0.01
+            )
+
+        self.assertEqual(result, mock_response)
+        self.assertEqual(mock_client.models.generate_content.call_count, 3)
+        self.assertEqual(mock_sleep.call_count, 2)
 
 if __name__ == "__main__":
     unittest.main()

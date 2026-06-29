@@ -29,6 +29,7 @@
                 <button class="nav-tab active" id="tab-upload" data-view="view-upload">Upload Extractor</button>
                 <button class="nav-tab" id="tab-history" data-view="view-history">Extraction History</button>
                 <button class="nav-tab" id="tab-constellation" data-view="view-constellation">Outfit Constellation</button>
+                <button class="nav-tab" id="tab-search" data-view="view-search">Advanced Search</button>
             </nav>
         </header>
 
@@ -51,7 +52,8 @@
                             <div class="form-group">
                                 <label for="model-select">Target Model</label>
                                 <select id="model-select" name="model" class="custom-select">
-                                    <option value="gemini-3.1-flash-lite" selected>gemini-3.1-flash-lite (Recommended)</option>
+                                    <option value="gemini-3-flash-preview" selected>gemini-3-flash-preview (Recommended)</option>
+                                    <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite</option>
                                     <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite</option>
                                     <option value="gemini-2.5-flash">gemini-2.5-flash</option>
                                 </select>
@@ -81,6 +83,11 @@
                                     <input type="checkbox" id="dry-run" name="dry_run">
                                     <span class="checkbox-checkmark"></span>
                                     Dry run (Cost & Token Estimation Only)
+                                </label>
+                                <label class="checkbox-container">
+                                    <input type="checkbox" id="embed-metadata" name="embed_metadata" checked>
+                                    <span class="checkbox-checkmark"></span>
+                                    Embed AI findings as metadata in stored video (Privacy: metadata travels with the video)
                                 </label>
                             </div>
 
@@ -112,6 +119,9 @@
                             <h3 id="processing-title">Analyzing Video...</h3>
                             <p class="processing-detail" id="processing-detail">Uploading file via File API and querying Gemini. Please do not close this window.</p>
                             
+                            <!-- Detailed Step Checklist -->
+                            <div id="processing-steps-checklist" style="display: flex; flex-direction: column; gap: 0.65rem; text-align: left; margin: 1.25rem 0; width: 100%;"></div>
+
                             <div class="batch-progress-container" id="batch-progress-container" style="display: none; margin-top: 1rem; width: 100%;">
                                 <div class="batch-progress-text" style="font-size: 0.75rem; display: flex; justify-content: space-between; margin-bottom: 0.25rem; font-family: var(--font-mono);">
                                     <span id="batch-progress-status">Uploading item 1 of 5</span>
@@ -122,8 +132,14 @@
                                 </div>
                             </div>
 
-                            <div class="progress-bar-container" id="single-progress-bar-container" style="width: 100%; margin-top: 1rem;">
-                                <div class="progress-bar-shimmer"></div>
+                            <div id="single-progress-container" style="width: 100%; margin-top: 1rem;">
+                                <div style="font-size: 0.75rem; display: flex; justify-content: space-between; margin-bottom: 0.25rem; font-family: var(--font-mono); color: rgba(255,255,255,0.6);">
+                                    <span>Extraction Progress</span>
+                                    <span id="single-progress-percent">0%</span>
+                                </div>
+                                <div class="progress-bar-container">
+                                    <div class="progress-bar-fill" id="single-progress-bar-fill" style="width: 0%; height: 100%; background: linear-gradient(90deg, var(--primary-accent), #38bdf8); border-radius: 4px; transition: width 0.4s ease;"></div>
+                                </div>
                             </div>
                             
                             <button type="button" class="btn-danger" id="btn-abort-batch" style="display: none; margin-top: 1.5rem; width: 100%;">Abort Queue</button>
@@ -162,9 +178,14 @@
                 <div class="glass-card history-card">
                     <div class="history-header">
                         <h2>Run History</h2>
-                        <button class="btn-secondary" id="btn-refresh-history">
-                            <i data-lucide="refresh-cw"></i> Refresh
-                        </button>
+                        <div class="history-actions" style="display: flex; gap: 0.5rem;">
+                            <button class="btn-secondary" id="btn-export-csv">
+                                <i data-lucide="download"></i> Export CSV
+                            </button>
+                            <button class="btn-secondary" id="btn-refresh-history">
+                                <i data-lucide="refresh-cw"></i> Refresh
+                            </button>
+                        </div>
                     </div>
 
                     <div class="history-grid-container">
@@ -197,16 +218,28 @@
                             <h2>Outfit Constellation Map</h2>
                             <span class="constellation-subtitle">Proximity represents visual outfit similarity. Nearby dots share matching clothes.</span>
                         </div>
-                        <div class="filter-toggle-bar">
-                            <button class="filter-toggle-btn active" data-mode="full">Full Outfit</button>
-                            <button class="filter-toggle-btn" data-mode="clothing">Clothing Only</button>
-                            <button class="filter-toggle-btn" data-mode="top">Top Only</button>
-                            <button class="filter-toggle-btn" data-mode="bottom">Bottom Only</button>
+                        <div class="constellation-controls" style="display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap;">
+                            <div class="search-filter-group">
+                                <input type="text" id="constellation-search" placeholder="Search outfits (e.g. denim, red)..." class="custom-select search-input" style="width: 250px; font-size: 0.75rem; padding: 0.4rem 0.75rem;">
+                            </div>
+                            <div class="filter-toggle-bar">
+                                <button class="filter-toggle-btn active" data-mode="full">Full Outfit</button>
+                                <button class="filter-toggle-btn" data-mode="clothing">Clothing Only</button>
+                                <button class="filter-toggle-btn" data-mode="top">Top Only</button>
+                                <button class="filter-toggle-btn" data-mode="bottom">Bottom Only</button>
+                            </div>
                         </div>
                     </div>
 
                     <div class="constellation-canvas-container" id="canvas-container">
                         <canvas id="constellation-canvas"></canvas>
+                        
+                        <!-- Constellation Guide Hint -->
+                        <div class="constellation-hint glass-card" id="constellation-hint">
+                            <i data-lucide="info"></i>
+                            <span>Drag to pan. Scroll to zoom. Click dots for details.</span>
+                            <button class="hint-close" id="btn-close-hint" aria-label="Close guide">&times;</button>
+                        </div>
                         
                         <!-- Floating Tooltip -->
                         <div class="constellation-tooltip" id="constellation-tooltip"></div>
@@ -246,12 +279,94 @@
                     </div>
                 </div>
             </section>
+
+            <!-- View: Advanced Search -->
+            <section id="view-search" class="view-section">
+                <div class="glass-card" style="padding: 1.5rem; display: flex; flex-direction: column; gap: 1.25rem;">
+                    <div class="history-header" style="margin-bottom: 0;">
+                        <h2 style="border-bottom: none; padding-bottom: 0; margin-bottom: 0;">Advanced Search</h2>
+                        <div class="filter-toggle-bar">
+                            <button class="filter-toggle-btn active" data-search-mode="AND">Match ALL (AND)</button>
+                            <button class="filter-toggle-btn" data-search-mode="OR">Match ANY (OR)</button>
+                        </div>
+                    </div>
+
+                    <!-- Include Rules -->
+                    <div class="search-rules-container">
+                        <h4 style="font-size: 0.8rem; color: rgba(255,255,255,0.8); margin-bottom: 0.5rem;">Include (Must contain)</h4>
+                        <div id="include-rules-list" class="batch-queue-list"></div>
+                        <button class="btn-secondary" id="btn-add-include" style="margin-top: 0.5rem;">
+                            <i data-lucide="plus"></i> Add Rule
+                        </button>
+                    </div>
+
+                    <!-- Exclude Rules -->
+                    <div class="search-rules-container">
+                        <h4 style="font-size: 0.8rem; color: rgba(255,255,255,0.8); margin-bottom: 0.5rem;">Blacklist (Must NOT contain)</h4>
+                        <div id="exclude-rules-list" class="batch-queue-list"></div>
+                        <button class="btn-secondary" id="btn-add-exclude" style="margin-top: 0.5rem;">
+                            <i data-lucide="plus"></i> Add Blacklist Rule
+                        </button>
+                    </div>
+
+                    <div style="display: flex; justify-content: flex-end; gap: 0.5rem;">
+                        <button class="btn-secondary" id="btn-clear-search">Clear All</button>
+                        <button class="btn-primary" id="btn-run-search">
+                            <i data-lucide="search" style="width: 16px; height: 16px; margin-right: 0.3rem;"></i> Search Database
+                        </button>
+                    </div>
+                </div>
+
+                <!-- Search Results -->
+                <div class="glass-card history-card" style="margin-top: 1.25rem;">
+                    <div class="history-header">
+                        <h2>Search Results</h2>
+                        <span id="search-result-count" style="font-size: 0.75rem; color: rgba(255,255,255,0.5);"></span>
+                    </div>
+                    <div class="history-grid-container">
+                        <div class="history-grid" id="search-results-grid"></div>
+                    </div>
+                </div>
+            </section>
         </main>
         
         <footer class="app-footer">
             <p>Wovely CV System • Powered by Google Gemini</p>
         </footer>
     </div>
+
+    <!-- Video Player Modal -->
+    <div id="video-modal" class="history-modal">
+        <div class="glass-card" style="max-width: 720px; padding: 1.25rem;">
+            <div class="history-modal-header">
+                <h2 id="video-modal-title">Video Playback</h2>
+                <button class="btn-close-modal" id="btn-close-video-modal">&times;</button>
+            </div>
+            <div style="margin-top: 0.5rem;">
+                <video id="video-player" controls autoplay style="width: 100%; border-radius: 8px; max-height: 70vh; background: #000; outline: none;"></video>
+            </div>
+        </div>
+    </div>
+
+    <!-- Custom Confirm Modal -->
+    <div id="confirm-modal" class="confirm-modal-overlay" aria-hidden="true" role="dialog">
+        <div class="glass-card confirm-modal-content">
+            <div class="confirm-modal-header">
+                <h3 id="confirm-modal-title">Confirm Action</h3>
+            </div>
+            <div class="confirm-modal-body">
+                <p id="confirm-modal-message">Are you sure you want to proceed?</p>
+            </div>
+            <div class="confirm-modal-actions">
+                <button class="btn-secondary" id="confirm-modal-cancel">Cancel</button>
+                <button class="btn-primary" id="confirm-modal-ok">Confirm</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Toast Notifications Container -->
+    <div id="toast-container" class="toast-container" aria-live="polite"></div>
+
     <script src="{{ url_for('static', filename='app.js') }}"></script>
 </body>
 </html>

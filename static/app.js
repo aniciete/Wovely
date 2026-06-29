@@ -25,7 +25,10 @@ document.addEventListener("DOMContentLoaded", () => {
     const batchProgressPercent = document.getElementById("batch-progress-percent");
     const batchProgressBarFill = document.getElementById("batch-progress-bar-fill");
     const btnAbortBatch = document.getElementById("btn-abort-batch");
-    const singleProgressBarContainer = document.getElementById("single-progress-bar-container");
+    const processingStepsChecklist = document.getElementById("processing-steps-checklist");
+    const singleProgressContainer = document.getElementById("single-progress-container");
+    const singleProgressPercent = document.getElementById("single-progress-percent");
+    const singleProgressBarFill = document.getElementById("single-progress-bar-fill");
     const processingTitle = document.getElementById("processing-title");
     const processingDetail = document.getElementById("processing-detail");
     
@@ -53,6 +56,154 @@ document.addEventListener("DOMContentLoaded", () => {
     const modalPeopleContainer = document.getElementById("modal-people-container");
     const modalMetadata = document.getElementById("modal-metadata");
 
+    // Custom Dialog DOM Elements
+    const confirmModal = document.getElementById("confirm-modal");
+    const confirmModalMessage = document.getElementById("confirm-modal-message");
+    const confirmModalCancel = document.getElementById("confirm-modal-cancel");
+    const confirmModalOk = document.getElementById("confirm-modal-ok");
+    const constellationHint = document.getElementById("constellation-hint");
+    const btnCloseHint = document.getElementById("btn-close-hint");
+
+    let confirmResolver = null;
+
+    // Toast Notification System
+    function showToast(message, type = "info") {
+        const container = document.getElementById("toast-container");
+        if (!container) return;
+
+        const toast = document.createElement("div");
+        toast.className = `toast ${type}`;
+        
+        let iconName = "info";
+        if (type === "success") iconName = "check-circle";
+        if (type === "error") iconName = "alert-circle";
+        if (type === "warning") iconName = "alert-triangle";
+
+        toast.innerHTML = `
+            <div class="toast-icon"><i data-lucide="${iconName}"></i></div>
+            <div class="toast-message">${message}</div>
+            <button class="toast-close" aria-label="Close message">&times;</button>
+        `;
+
+        container.appendChild(toast);
+        lucide.createIcons();
+
+        // Animate in
+        setTimeout(() => {
+            toast.classList.add("show");
+        }, 10);
+
+        // Auto close after 4s
+        const autoCloseTimeout = setTimeout(() => {
+            closeToast(toast);
+        }, 4000);
+
+        // Bind close button
+        const closeBtn = toast.querySelector(".toast-close");
+        closeBtn.addEventListener("click", () => {
+            clearTimeout(autoCloseTimeout);
+            closeToast(toast);
+        });
+    }
+
+    function closeToast(toast) {
+        toast.classList.remove("show");
+        toast.classList.add("hide");
+        toast.addEventListener("transitionend", () => {
+            toast.remove();
+        });
+    }
+
+    // Custom Confirm Modal Dialog
+    function showConfirm(message, isDestructive = false) {
+        return new Promise((resolve) => {
+            confirmResolver = resolve;
+            if (confirmModalMessage) confirmModalMessage.textContent = message;
+            
+            if (confirmModalOk) {
+                if (isDestructive) {
+                    confirmModalOk.className = "btn-primary btn-danger-fill";
+                } else {
+                    confirmModalOk.className = "btn-primary";
+                }
+            }
+            
+            if (confirmModal) {
+                confirmModal.classList.add("active");
+                confirmModal.setAttribute("aria-hidden", "false");
+            }
+        });
+    }
+
+    function closeConfirmModal(result) {
+        if (confirmModal) {
+            confirmModal.classList.remove("active");
+            confirmModal.setAttribute("aria-hidden", "true");
+        }
+        if (confirmResolver) {
+            confirmResolver(result);
+            confirmResolver = null;
+        }
+    }
+
+    if (confirmModalCancel) {
+        confirmModalCancel.addEventListener("click", () => closeConfirmModal(false));
+    }
+    if (confirmModalOk) {
+        confirmModalOk.addEventListener("click", () => closeConfirmModal(true));
+    }
+    if (confirmModal) {
+        confirmModal.addEventListener("click", (e) => {
+            if (e.target === confirmModal) {
+                closeConfirmModal(false);
+            }
+        });
+    }
+
+    // Video Player Modal
+    const videoModal = document.getElementById("video-modal");
+    const videoPlayer = document.getElementById("video-player");
+    const videoModalTitle = document.getElementById("video-modal-title");
+    const btnCloseVideoModal = document.getElementById("btn-close-video-modal");
+
+    function openVideoModal(runId, videoName) {
+        if (!videoModal || !videoPlayer) return;
+        videoPlayer.src = `/api/runs/${runId}/video`;
+        videoModalTitle.textContent = videoName || "Video Playback";
+        videoModal.classList.add("active");
+    }
+
+    function closeVideoModal() {
+        if (!videoModal || !videoPlayer) return;
+        videoModal.classList.remove("active");
+        videoPlayer.pause();
+        videoPlayer.removeAttribute("src");
+        videoPlayer.load();
+    }
+
+    if (btnCloseVideoModal) {
+        btnCloseVideoModal.addEventListener("click", closeVideoModal);
+    }
+    if (videoModal) {
+        videoModal.addEventListener("click", (e) => {
+            if (e.target === videoModal) {
+                closeVideoModal();
+            }
+        });
+    }
+
+    // Global event delegation for video link buttons
+    document.addEventListener("click", (e) => {
+        const videoLink = e.target.closest(".btn-video-link[data-run-id], .btn-video-link-sm[data-run-id]");
+        if (videoLink) {
+            e.preventDefault();
+            e.stopPropagation();
+            const runId = videoLink.getAttribute("data-run-id");
+            const videoName = videoLink.getAttribute("data-video-name") || "Video";
+            openVideoModal(runId, videoName);
+        }
+    });
+
     // Local Variables
     let selectedFiles = [];
     let isBatchActive = false;
@@ -60,11 +211,13 @@ document.addEventListener("DOMContentLoaded", () => {
     let abortController = null;
     let listHoveredPoint = null;
     let activePollInterval = null;
+    let searchQuery = "";
 
     // --- Tab Switching Navigation ---
     navTabs.forEach(tab => {
         tab.addEventListener("click", () => {
             const targetViewId = tab.getAttribute("data-view");
+            localStorage.setItem("wovely-current-view", targetViewId);
             
             // Switch tabs active state
             navTabs.forEach(t => t.classList.remove("active"));
@@ -86,6 +239,15 @@ document.addEventListener("DOMContentLoaded", () => {
             }
         });
     });
+
+    // Restore persisted tab view
+    const persistedView = localStorage.getItem("wovely-current-view");
+    if (persistedView) {
+        const matchingTab = Array.from(navTabs).find(t => t.getAttribute("data-view") === persistedView);
+        if (matchingTab) {
+            matchingTab.click();
+        }
+    }
 
     // --- Banner Close ---
     if (btnCloseBanner) {
@@ -137,6 +299,23 @@ document.addEventListener("DOMContentLoaded", () => {
         });
     }
 
+    // Export CSV listener
+    const btnExportCsv = document.getElementById("btn-export-csv");
+    if (btnExportCsv) {
+        btnExportCsv.addEventListener("click", () => {
+            window.location.href = "/api/export";
+        });
+    }
+
+    // Constellation search listener
+    const constellationSearch = document.getElementById("constellation-search");
+    if (constellationSearch) {
+        constellationSearch.addEventListener("input", (e) => {
+            searchQuery = e.target.value.toLowerCase().trim();
+            drawConstellation();
+        });
+    }
+
     function handleFileSelection(files) {
         selectedFiles = Array.from(files).filter(file => file.type.startsWith("video/"));
         
@@ -152,7 +331,7 @@ document.addEventListener("DOMContentLoaded", () => {
             }
             btnSubmit.disabled = false;
         } else {
-            alert("Please select one or more valid video files.");
+            showToast("Please select one or more valid video files.", "error");
             selectedFiles = [];
             fileNameDisplay.textContent = "";
             batchQueueContainer.style.display = "none";
@@ -214,7 +393,7 @@ document.addEventListener("DOMContentLoaded", () => {
         if (selectedFiles.length === 1) {
             // Single file processing
             isBatchActive = false;
-            singleProgressBarContainer.style.display = "block";
+            singleProgressContainer.style.display = "block";
             batchProgressContainer.style.display = "none";
             btnAbortBatch.style.display = "none";
             processingTitle.textContent = "Analyzing Video...";
@@ -228,7 +407,7 @@ document.addEventListener("DOMContentLoaded", () => {
             currentBatchIndex = 0;
             abortController = new AbortController();
             
-            singleProgressBarContainer.style.display = "none";
+            singleProgressContainer.style.display = "none";
             batchProgressContainer.style.display = "block";
             btnAbortBatch.style.display = "block";
             processingTitle.textContent = "Processing Video Batch...";
@@ -248,6 +427,7 @@ document.addEventListener("DOMContentLoaded", () => {
         formData.set("video", file);
         formData.set("dry_run", document.getElementById("dry-run").checked);
         formData.set("minor_possible", document.getElementById("minor-possible").checked);
+        formData.set("embed_metadata", document.getElementById("embed-metadata").checked);
 
         fetch("/api/extract", {
             method: "POST",
@@ -269,6 +449,60 @@ document.addEventListener("DOMContentLoaded", () => {
         });
     }
 
+    const STAGE_ORDER = [
+        { code: "safety_check", text: "Initializing safety filters", pct: 10 },
+        { code: "uploading_to_gemini", text: "Uploading video to Google Gemini File API", pct: 25 },
+        { code: "processing_on_gemini", text: "Transcoding and processing on Gemini servers", pct: 45 },
+        { code: "querying_model", text: "Analyzing clothing details & extracting attributes", pct: 70 },
+        { code: "generating_embeddings", text: "Generating semantic outfit embeddings", pct: 80 },
+        { code: "warming_constellation_cache", text: "Updating Outfit Constellation cluster mapping", pct: 90 },
+        { code: "writing_video_metadata", text: "Embedding AI findings into source video file", pct: 95 }
+    ];
+
+    function renderChecklist(activeCode) {
+        if (!processingStepsChecklist) return;
+        
+        let activeIndex = STAGE_ORDER.findIndex(s => s.code === activeCode);
+        if (activeCode === "success") {
+            activeIndex = STAGE_ORDER.length; // All completed
+            if (singleProgressBarFill && singleProgressPercent) {
+                singleProgressBarFill.style.width = "100%";
+                singleProgressPercent.textContent = "100%";
+            }
+        } else if (activeIndex === -1) {
+            activeIndex = 0;
+        }
+
+        processingStepsChecklist.innerHTML = "";
+        STAGE_ORDER.forEach((stage, idx) => {
+            const stepDiv = document.createElement("div");
+            stepDiv.className = "processing-step";
+            
+            let iconHtml = "";
+            if (idx < activeIndex) {
+                stepDiv.classList.add("completed");
+                iconHtml = `<i data-lucide="check-circle"></i>`;
+            } else if (idx === activeIndex) {
+                stepDiv.classList.add("active");
+                iconHtml = `<i data-lucide="loader" class="spin"></i>`;
+                
+                // Update progress bar
+                if (singleProgressBarFill && singleProgressPercent) {
+                    singleProgressBarFill.style.width = `${stage.pct}%`;
+                    singleProgressPercent.textContent = `${stage.pct}%`;
+                }
+            } else {
+                stepDiv.classList.add("pending");
+                iconHtml = `<i data-lucide="circle"></i>`;
+            }
+            
+            stepDiv.innerHTML = `${iconHtml}<span>${stage.text}</span>`;
+            processingStepsChecklist.appendChild(stepDiv);
+        });
+
+        lucide.createIcons();
+    }
+
     function pollRunStatus(runId, onSuccess, onFailure) {
         const pollInterval = setInterval(() => {
             fetch(`/api/runs/${runId}`)
@@ -279,6 +513,14 @@ document.addEventListener("DOMContentLoaded", () => {
                 return response.json();
             })
             .then(data => {
+                if (data.status_detail) {
+                    renderChecklist(data.status_detail);
+                    const activeStage = STAGE_ORDER.find(s => s.code === data.status_detail);
+                    if (activeStage) {
+                        processingDetail.textContent = `${activeStage.text}. Please do not close this window.`;
+                    }
+                }
+                
                 if (data.status === "processing") {
                     return;
                 }
@@ -287,8 +529,10 @@ document.addEventListener("DOMContentLoaded", () => {
                 activePollInterval = null;
                 
                 if (data.status === "failed") {
+                    renderChecklist("failed");
                     onFailure(new Error(data.error || "Processing failed."));
                 } else if (data.status === "dry_run") {
+                    renderChecklist("success");
                     // Clean up dry run from database history
                     fetch(`/api/runs/${runId}`, { method: "DELETE" })
                     .catch(err => console.error("Failed to delete dry run:", err));
@@ -301,6 +545,7 @@ document.addEventListener("DOMContentLoaded", () => {
                     }
                     onSuccess(resultData);
                 } else {
+                    renderChecklist("success");
                     let resultData = data;
                     if (data.raw_json) {
                         try {
@@ -322,10 +567,12 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     function uploadSingleFile(file) {
+        renderChecklist("safety_check");
         const formData = new FormData(extractForm);
         formData.set("video", file);
         formData.set("dry_run", document.getElementById("dry-run").checked);
         formData.set("minor_possible", document.getElementById("minor-possible").checked);
+        formData.set("embed_metadata", document.getElementById("embed-metadata").checked);
 
         if (activePollInterval) {
             clearInterval(activePollInterval);
@@ -370,7 +617,7 @@ document.addEventListener("DOMContentLoaded", () => {
         if (!isBatchActive) return;
         
         if (currentBatchIndex >= selectedFiles.length) {
-            alert(`Batch extraction completed successfully! Processed ${selectedFiles.length} files.`);
+            showToast(`Batch extraction completed successfully! Processed ${selectedFiles.length} files.`, "success");
             isBatchActive = false;
             switchResultState("idle");
             
@@ -390,12 +637,14 @@ document.addEventListener("DOMContentLoaded", () => {
         batchProgressBarFill.style.width = `${progressPct}%`;
         processingDetail.textContent = `Extracting attributes for "${file.name}"...`;
         
+        renderChecklist("safety_check");
         updateQueueItemStatus(currentBatchIndex, "processing", "Processing");
 
         const formData = new FormData(extractForm);
         formData.set("video", file);
         formData.set("dry_run", document.getElementById("dry-run").checked);
         formData.set("minor_possible", document.getElementById("minor-possible").checked);
+        formData.set("embed_metadata", document.getElementById("embed-metadata").checked);
 
         if (activePollInterval) {
             clearInterval(activePollInterval);
@@ -474,8 +723,8 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     if (btnAbortBatch) {
-        btnAbortBatch.addEventListener("click", () => {
-            if (!confirm("Are you sure you want to abort the current batch extraction queue? Unprocessed files will be skipped.")) return;
+        btnAbortBatch.addEventListener("click", async () => {
+            if (!await showConfirm("Are you sure you want to abort the current batch extraction queue? Unprocessed files will be skipped.", true)) return;
             
             isBatchActive = false;
             if (activePollInterval) {
@@ -490,7 +739,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 updateQueueItemStatus(i, "aborted", "Aborted");
             }
             
-            alert("Batch extraction aborted by user.");
+            showToast("Batch extraction aborted by user.", "warning");
             switchResultState("idle");
             
             selectedFiles = [];
@@ -502,10 +751,22 @@ document.addEventListener("DOMContentLoaded", () => {
 
     // --- Render Extraction Result ---
     function renderResult(data) {
-        resultTitle.textContent = data.source_video;
+        const chunk = data.chunks ? data.chunks[0] : null;
+        const platformMeta = chunk ? chunk.platform_metadata : null;
+        const platformName = platformMeta ? platformMeta.platform : (data.platform_name || null);
+        const platformHandle = platformMeta ? platformMeta.handle : (data.platform_handle || null);
+        
+        const handleBadge = platformHandle 
+            ? `<span class="attr-badge topwear" style="margin-left: 0.5rem; font-size: 0.65rem; padding: 0.15rem 0.4rem; vertical-align: middle;">${platformName || 'Watermark'}: ${platformHandle}</span>` 
+            : '';
+        
+        const videoLink = data.db_id
+            ? `<button class="btn-video-link" data-run-id="${data.db_id}" data-video-name="${data.source_video}" style="margin-left: 0.5rem; vertical-align: middle;"><i data-lucide="play-circle"></i> Watch Video</button>
+               <a class="btn-video-link" href="/api/runs/${data.db_id}/video-with-metadata" download style="margin-left: 0.25rem; vertical-align: middle;"><i data-lucide="download"></i> Download</a>`
+            : '';
+        resultTitle.innerHTML = `<span style="vertical-align: middle;">${data.source_video}</span>${handleBadge}${videoLink}`;
         
         // 1. Status badge
-        const chunk = data.chunks ? data.chunks[0] : null;
         const status = chunk ? chunk.status : "ok";
         resultStatus.className = `status-badge ${status === 'ok' ? 'success' : 'warning'}`;
         resultStatus.textContent = status;
@@ -521,7 +782,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 </div>`;
         } else {
             peopleList.forEach(person => {
-                resultPeopleContainer.appendChild(createPersonCard(person));
+                resultPeopleContainer.appendChild(createPersonCard(person, false, data.db_id));
             });
         }
 
@@ -537,13 +798,46 @@ document.addEventListener("DOMContentLoaded", () => {
         `;
     }
 
-    function createPersonCard(person) {
+    function createPersonCard(person, isEditable = false, runId = null) {
         const card = document.createElement("div");
         card.className = "people-card";
 
+        const header = document.createElement("div");
+        header.className = "people-card-header";
+
+        const titleGroup = document.createElement("div");
+        titleGroup.style.display = "flex";
+        titleGroup.style.alignItems = "center";
+        titleGroup.style.gap = "0.5rem";
+        titleGroup.style.flexWrap = "wrap";
+
         const title = document.createElement("h4");
         title.textContent = person.person_label;
-        card.appendChild(title);
+        titleGroup.appendChild(title);
+
+        // Add video link button if runId is available
+        if (runId) {
+            const videoLink = document.createElement("button");
+            videoLink.className = "btn-video-link";
+            videoLink.setAttribute("data-run-id", runId);
+            videoLink.setAttribute("data-video-name", person.person_label);
+            videoLink.innerHTML = `<i data-lucide="play-circle"></i> Watch Video`;
+            titleGroup.appendChild(videoLink);
+        }
+
+        header.appendChild(titleGroup);
+
+        if (isEditable && person.person_id) {
+            const editBtn = document.createElement("button");
+            editBtn.className = "btn-edit-person";
+            editBtn.innerHTML = `<i data-lucide="edit-3"></i> Edit`;
+            header.appendChild(editBtn);
+
+            editBtn.addEventListener("click", () => {
+                toggleEditPersonCard(card, person);
+            });
+        }
+        card.appendChild(header);
 
         const rows = document.createElement("div");
         rows.className = "attribute-rows";
@@ -637,6 +931,153 @@ document.addEventListener("DOMContentLoaded", () => {
         return card;
     }
 
+    function toggleEditPersonCard(card, person) {
+        const header = card.querySelector(".people-card-header");
+        if (header) {
+            const editBtn = header.querySelector(".btn-edit-person");
+            if (editBtn) editBtn.style.display = "none";
+        }
+        
+        const rows = card.querySelector(".attribute-rows");
+        if (rows) rows.style.display = "none";
+        
+        const formContainer = document.createElement("div");
+        formContainer.className = "edit-form-container";
+        
+        const hair = person.hair || {};
+        const top = person.top || {};
+        const bottom = person.bottom || {};
+        
+        formContainer.innerHTML = `
+            <div class="edit-form-section">
+                <h5>Hair Attributes</h5>
+                <div class="edit-form-grid">
+                    <div class="edit-field"><label>Color</label><input type="text" name="hair_color" value="${hair.color || ''}"></div>
+                    <div class="edit-field"><label>Texture</label><input type="text" name="hair_texture" value="${hair.texture || ''}"></div>
+                    <div class="edit-field"><label>Length</label><input type="text" name="hair_length" value="${hair.length || ''}"></div>
+                    <div class="edit-field"><label>Style</label><input type="text" name="hair_style" value="${hair.style || ''}"></div>
+                </div>
+            </div>
+            <div class="edit-form-section">
+                <h5>Topwear Attributes</h5>
+                <div class="edit-form-grid">
+                    <div class="edit-field"><label>Type</label><input type="text" name="top_type" value="${top.type || ''}"></div>
+                    <div class="edit-field"><label>Color</label><input type="text" name="top_color" value="${top.color || ''}"></div>
+                    <div class="edit-field"><label>Fit</label><input type="text" name="top_fit" value="${top.fit || ''}"></div>
+                    <div class="edit-field"><label>Fabric</label><input type="text" name="top_fabric" value="${top.fabric || ''}"></div>
+                    <div class="edit-field"><label>Pattern</label><input type="text" name="top_pattern" value="${top.pattern || ''}"></div>
+                    <div class="edit-field"><label>Neckline</label><input type="text" name="top_neckline" value="${top.neckline || ''}"></div>
+                    <div class="edit-field"><label>Sleeve Length</label><input type="text" name="top_sleeve_length" value="${top.sleeve_length || ''}"></div>
+                    <div class="edit-field"><label>Details (comma-separated)</label><input type="text" name="top_details" value="${(top.details || []).join(', ')}"></div>
+                </div>
+            </div>
+            <div class="edit-form-section">
+                <h5>Bottomwear Attributes</h5>
+                <div class="edit-form-grid">
+                    <div class="edit-field"><label>Type</label><input type="text" name="bottom_type" value="${bottom.type || ''}"></div>
+                    <div class="edit-field"><label>Color</label><input type="text" name="bottom_color" value="${bottom.color || ''}"></div>
+                    <div class="edit-field"><label>Fit</label><input type="text" name="bottom_fit" value="${bottom.fit || ''}"></div>
+                    <div class="edit-field"><label>Fabric</label><input type="text" name="bottom_fabric" value="${bottom.fabric || ''}"></div>
+                    <div class="edit-field"><label>Pattern</label><input type="text" name="bottom_pattern" value="${bottom.pattern || ''}"></div>
+                    <div class="edit-field"><label>Garment Length</label><input type="text" name="bottom_garment_length" value="${bottom.garment_length || ''}"></div>
+                    <div class="edit-field"><label>Details (comma-separated)</label><input type="text" name="bottom_details" value="${(bottom.details || []).join(', ')}"></div>
+                </div>
+            </div>
+            <div class="edit-actions">
+                <button class="btn-secondary btn-cancel-edit">Cancel</button>
+                <button class="btn-primary btn-save-edit">Save</button>
+            </div>
+        `;
+        
+        card.appendChild(formContainer);
+        
+        const cancelBtn = formContainer.querySelector(".btn-cancel-edit");
+        cancelBtn.addEventListener("click", () => {
+            formContainer.remove();
+            if (header) {
+                const editBtn = header.querySelector(".btn-edit-person");
+                if (editBtn) editBtn.style.display = "inline-flex";
+            }
+            if (rows) rows.style.display = "flex";
+        });
+        
+        const saveBtn = formContainer.querySelector(".btn-save-edit");
+        saveBtn.addEventListener("click", () => {
+            const getVal = (name) => formContainer.querySelector(`[name="${name}"]`).value.trim();
+            const getDetailsList = (name) => {
+                const val = getVal(name);
+                return val ? val.split(",").map(s => s.trim()).filter(Boolean) : [];
+            };
+            
+            const updatedData = {
+                hair: {
+                    color: getVal("hair_color") || null,
+                    texture: getVal("hair_texture") || null,
+                    length: getVal("hair_length") || null,
+                    style: getVal("hair_style") || null
+                },
+                top: {
+                    type: getVal("top_type") || null,
+                    color: getVal("top_color") || null,
+                    fit: getVal("top_fit") || null,
+                    fabric: getVal("top_fabric") || null,
+                    pattern: getVal("top_pattern") || null,
+                    neckline: getVal("top_neckline") || null,
+                    sleeve_length: getVal("top_sleeve_length") || null,
+                    details: getDetailsList("top_details")
+                },
+                bottom: {
+                    type: getVal("bottom_type") || null,
+                    color: getVal("bottom_color") || null,
+                    fit: getVal("bottom_fit") || null,
+                    fabric: getVal("bottom_fabric") || null,
+                    pattern: getVal("bottom_pattern") || null,
+                    garment_length: getVal("bottom_garment_length") || null,
+                    details: getDetailsList("bottom_details")
+                }
+            };
+            
+            saveBtn.disabled = true;
+            saveBtn.textContent = "Saving...";
+            
+            fetch(`/api/people/${person.person_id}`, {
+                method: "PUT",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(updatedData)
+            })
+            .then(res => res.json())
+            .then(resData => {
+                if (resData.success) {
+                    showToast("Person attributes updated successfully!", "success");
+                    
+                    // Reload panel/modal
+                    const activeTab = document.querySelector(".nav-tab.active");
+                    if (activeTab && activeTab.id === "tab-history") {
+                        const currentRunId = modalRunTitle.getAttribute("data-run-id");
+                        if (currentRunId) {
+                            showRunDetail(currentRunId);
+                            loadHistory();
+                        }
+                    } else if (activeTab && activeTab.id === "tab-constellation") {
+                        loadConstellation();
+                        if (selectedPoint) {
+                            showConstellationDetail(selectedPoint);
+                        }
+                    }
+                } else {
+                    showToast("Failed to save: " + resData.error, "error");
+                    saveBtn.disabled = false;
+                    saveBtn.textContent = "Save";
+                }
+            })
+            .catch(err => {
+                showToast("Network error: " + err.message, "error");
+                saveBtn.disabled = false;
+                saveBtn.textContent = "Save";
+            });
+        });
+    }
+
     function createBadge(typeClass, text) {
         const badge = document.createElement("span");
         badge.className = `attr-badge ${typeClass}`;
@@ -682,9 +1123,16 @@ document.addEventListener("DOMContentLoaded", () => {
             const durationText = run.duration_sec ? `${run.duration_sec.toFixed(1)}s` : "0.0s";
             const costText = run.est_cost_usd ? `$${run.est_cost_usd.toFixed(4)}` : "$0.0000";
 
+            const handleBadge = run.platform_handle 
+                ? `<span class="attr-badge topwear" style="margin-left: 0.5rem; font-size: 0.65rem; padding: 0.15rem 0.4rem; vertical-align: middle;">${run.platform_name || 'Watermark'}: ${run.platform_handle}</span>` 
+                : '';
+
             card.innerHTML = `
                 <div class="run-card-header">
-                    <div class="run-card-title">${run.source_video}</div>
+                    <div class="run-card-title" style="display: flex; align-items: center; flex-wrap: wrap; gap: 0.25rem;">
+                        <span style="vertical-align: middle;">${run.source_video}</span>
+                        ${handleBadge}
+                    </div>
                     <div class="run-card-date">${localDate}</div>
                 </div>
                 <div class="run-card-stats">
@@ -703,15 +1151,25 @@ document.addEventListener("DOMContentLoaded", () => {
                 </div>
                 <div class="run-card-footer">
                     <span class="run-card-model">${run.model}</span>
-                    <button class="btn-delete-card" data-id="${run.id}">Delete</button>
+                    <div style="display: flex; gap: 0.5rem; align-items: center;">
+                        <button class="btn-video-link" data-run-id="${run.id}" data-video-name="${run.source_video}">
+                            <i data-lucide="play-circle"></i> Video
+                        </button>
+                        <a class="btn-video-link" href="/api/runs/${run.id}/video-with-metadata" download>
+                            <i data-lucide="download"></i> Download
+                        </a>
+                        <button class="btn-delete-card" data-id="${run.id}">Delete</button>
+                    </div>
                 </div>
             `;
 
-            // Click card to show details, unless delete is clicked
+            // Click card to show details, unless delete or video link is clicked
             card.addEventListener("click", (e) => {
-                if (e.target.classList.contains("btn-delete-card")) {
+                if (e.target.closest(".btn-delete-card")) {
                     e.stopPropagation();
                     deleteRun(run.id);
+                } else if (e.target.closest(".btn-video-link, .btn-video-link-sm")) {
+                    e.stopPropagation();
                 } else {
                     showRunDetail(run.id);
                 }
@@ -724,8 +1182,8 @@ document.addEventListener("DOMContentLoaded", () => {
         lucide.createIcons();
     }
 
-    function deleteRun(runId) {
-        if (!confirm("Are you sure you want to delete this run from database history?")) return;
+    async function deleteRun(runId) {
+        if (!await showConfirm("Are you sure you want to delete this run from database history?", true)) return;
 
         fetch(`/api/runs/${runId}`, {
             method: "DELETE"
@@ -735,11 +1193,11 @@ document.addEventListener("DOMContentLoaded", () => {
             if (data.success) {
                 loadHistory();
             } else {
-                alert("Failed to delete run: " + data.error);
+                showToast("Failed to delete run: " + data.error, "error");
             }
         })
         .catch(err => {
-            alert("Network error: " + err.message);
+            showToast("Network error: " + err.message, "error");
         });
     }
 
@@ -747,7 +1205,12 @@ document.addEventListener("DOMContentLoaded", () => {
         fetch(`/api/runs/${runId}`)
             .then(res => res.json())
             .then(run => {
-                modalRunTitle.textContent = run.source_video;
+                const handleBadge = run.platform_handle 
+                    ? `<span class="attr-badge topwear" style="margin-left: 0.5rem; font-size: 0.65rem; padding: 0.15rem 0.4rem; vertical-align: middle;">${run.platform_name || 'Watermark'}: ${run.platform_handle}</span>` 
+                    : '';
+                const videoBtn = `<button class="btn-video-link" data-run-id="${runId}" data-video-name="${run.source_video}" style="margin-left: 0.5rem; vertical-align: middle;"><i data-lucide="play-circle"></i> Watch Video</button>`;
+                modalRunTitle.innerHTML = `<span style="vertical-align: middle;">${run.source_video}</span>${handleBadge}${videoBtn}`;
+                modalRunTitle.setAttribute("data-run-id", runId);
                 modalPeopleContainer.innerHTML = "";
                 
                 if (run.people.length === 0) {
@@ -758,7 +1221,7 @@ document.addEventListener("DOMContentLoaded", () => {
                         </div>`;
                 } else {
                     run.people.forEach(person => {
-                        modalPeopleContainer.appendChild(createPersonCard(person));
+                        modalPeopleContainer.appendChild(createPersonCard(person, true, runId));
                     });
                 }
 
@@ -778,7 +1241,7 @@ document.addEventListener("DOMContentLoaded", () => {
                 lucide.createIcons();
             })
             .catch(err => {
-                alert("Failed to load run detail: " + err.message);
+                showToast("Failed to load run detail: " + err.message, "error");
             });
     }
 
@@ -897,6 +1360,38 @@ document.addEventListener("DOMContentLoaded", () => {
         return "#6b7280";
     }
 
+    // Constellation Guide Hint Logic
+    function checkShowHint() {
+        if (canvas && constellationHint) {
+            const hintSeen = localStorage.getItem("wovely-constellation-hint-seen");
+            if (!hintSeen) {
+                constellationHint.style.display = "flex";
+                // Auto-fade after 8 seconds
+                setTimeout(hideHint, 8000);
+            } else {
+                constellationHint.style.display = "none";
+            }
+        }
+    }
+
+    function hideHint() {
+        if (constellationHint && constellationHint.style.display !== "none") {
+            constellationHint.classList.add("fade-out");
+            constellationHint.addEventListener("transitionend", () => {
+                constellationHint.style.display = "none";
+                constellationHint.classList.remove("fade-out");
+            }, { once: true });
+            localStorage.setItem("wovely-constellation-hint-seen", "true");
+        }
+    }
+
+    if (btnCloseHint) {
+        btnCloseHint.addEventListener("click", (e) => {
+            e.stopPropagation();
+            hideHint();
+        });
+    }
+
     function loadConstellation() {
         if (!canvas) return;
         
@@ -905,6 +1400,8 @@ document.addEventListener("DOMContentLoaded", () => {
         hoveredPoint = null;
         listHoveredPoint = null;
         constellationTooltip.style.display = "none";
+        
+        checkShowHint();
         
         fetch(`/api/constellation?mode=${currentMode}`)
             .then(res => res.json())
@@ -984,7 +1481,9 @@ document.addEventListener("DOMContentLoaded", () => {
 
         // 1. Draw connecting lines between points whose distance is close (< 0.25 under raw MDS scale)
         for (let i = 0; i < points.length; i++) {
+            if (!pointMatchesSearch(points[i])) continue;
             for (let j = i + 1; j < points.length; j++) {
+                if (!pointMatchesSearch(points[j])) continue;
                 const dx = points[i].x - points[j].x;
                 const dy = points[i].y - points[j].y;
                 const dist = Math.sqrt(dx*dx + dy*dy);
@@ -1009,7 +1508,7 @@ document.addEventListener("DOMContentLoaded", () => {
         }
 
         // 1.5 Draw highlighted direct connection line if listHoveredPoint is active
-        if (listHoveredPoint && selectedPoint) {
+        if (listHoveredPoint && selectedPoint && pointMatchesSearch(listHoveredPoint) && pointMatchesSearch(selectedPoint)) {
             ctx.save();
             const color = getDominantColorHex(listHoveredPoint.dominant_color);
             ctx.strokeStyle = color;
@@ -1030,11 +1529,14 @@ document.addEventListener("DOMContentLoaded", () => {
             const px = p.x * mdsScale;
             const py = p.y * mdsScale;
             
+            const matchesQuery = pointMatchesSearch(p);
             const isTarget = (hoveredPoint === p || selectedPoint === p || (listHoveredPoint && listHoveredPoint === p));
             const color = getDominantColorHex(p.dominant_color);
             
             let opacity = 1.0;
-            if (listHoveredPoint) {
+            if (!matchesQuery) {
+                opacity = 0.1;
+            } else if (listHoveredPoint) {
                 if (p !== selectedPoint && p !== listHoveredPoint) {
                     opacity = 0.15;
                 }
@@ -1043,7 +1545,7 @@ document.addEventListener("DOMContentLoaded", () => {
             const fillColor = (opacity < 1.0) ? hexToRgba(color, opacity) : color;
             
             ctx.shadowColor = color;
-            ctx.shadowBlur = (isTarget && opacity > 0.5) ? 15 : (opacity > 0.5 ? 6 : 0);
+            ctx.shadowBlur = (isTarget && opacity > 0.5) ? 15 : (opacity > 0.5 && matchesQuery ? 6 : 0);
             
             ctx.fillStyle = fillColor;
             ctx.beginPath();
@@ -1077,6 +1579,24 @@ document.addEventListener("DOMContentLoaded", () => {
         return { x: tx, y: ty };
     }
 
+    function pointMatchesSearch(p) {
+        if (!searchQuery) return true;
+        
+        const summaryText = (p.summary || "").toLowerCase();
+        const videoText = (p.source_video || "").toLowerCase();
+        const labelText = (p.person_label || "").toLowerCase();
+        const colorText = (p.dominant_color || "").toLowerCase();
+        const hairText = (p.hair_summary || "").toLowerCase();
+        
+        return (
+            summaryText.includes(searchQuery) ||
+            videoText.includes(searchQuery) ||
+            labelText.includes(searchQuery) ||
+            colorText.includes(searchQuery) ||
+            hairText.includes(searchQuery)
+        );
+    }
+
     function checkHover(e) {
         if (!canvas || points.length === 0) return;
         const pos = getMousePosTransformed(e);
@@ -1084,6 +1604,7 @@ document.addEventListener("DOMContentLoaded", () => {
         let minDist = 10 / zoom; // 10px hover radius
         
         points.forEach(p => {
+            if (!pointMatchesSearch(p)) return;
             const px = p.x * mdsScale;
             const py = p.y * mdsScale;
             const dist = Math.sqrt((pos.x - px) ** 2 + (pos.y - py) ** 2);
@@ -1140,7 +1661,8 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     function showConstellationDetail(point) {
-        constellationPanelVideo.textContent = point.source_video;
+        const videoBtn = `<button class="btn-video-link" data-run-id="${point.run_id}" data-video-name="${point.source_video}" style="margin-top: 0.5rem;"><i data-lucide="play-circle"></i> Watch Video</button>`;
+        constellationPanelVideo.innerHTML = `${point.source_video}${videoBtn}`;
         constellationPanelLabel.textContent = point.person_label;
         
         fetch(`/api/runs/${point.run_id}`)
@@ -1149,7 +1671,8 @@ document.addEventListener("DOMContentLoaded", () => {
                 const pData = run.people.find(p => p.person_label === point.person_label);
                 if (pData) {
                     constellationPanelAttributes.innerHTML = "";
-                    constellationPanelAttributes.appendChild(createPersonCard(pData));
+                    constellationPanelAttributes.appendChild(createPersonCard(pData, true, point.run_id));
+                    lucide.createIcons();
                 }
             });
             
@@ -1173,7 +1696,10 @@ document.addEventListener("DOMContentLoaded", () => {
                     
                     card.innerHTML = `
                         <div class="match-header">
-                            <span class="match-video-name" title="${match.source_video}">${match.source_video}</span>
+                            <div style="display: flex; align-items: center; gap: 0.4rem; min-width: 0;">
+                                <span class="match-video-name" title="${match.source_video}">${match.source_video}</span>
+                                <button class="btn-video-link-sm" data-run-id="${match.run_id}" data-video-name="${match.source_video}" title="Watch Video"><i data-lucide="play-circle"></i></button>
+                            </div>
                             <span class="match-pct">${scorePct}% match</span>
                         </div>
                         <div class="match-desc">${match.person_label} — ${match.outfit_summary}</div>
@@ -1201,6 +1727,8 @@ document.addEventListener("DOMContentLoaded", () => {
                     
                     constellationPanelSimilar.appendChild(card);
                 });
+                
+                lucide.createIcons();
             });
             
         constellationDetailPanel.classList.add("active");
@@ -1212,6 +1740,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
     if (canvas) {
         canvas.addEventListener("mousedown", (e) => {
+            hideHint();
             isDragging = true;
             startX = e.clientX - panX;
             startY = e.clientY - panY;
@@ -1238,6 +1767,7 @@ document.addEventListener("DOMContentLoaded", () => {
         });
 
         canvas.addEventListener("wheel", (e) => {
+            hideHint();
             e.preventDefault();
             const zoomIntensity = 0.1;
             const mousePos = getMousePosTransformed(e);
@@ -1256,6 +1786,96 @@ document.addEventListener("DOMContentLoaded", () => {
             if (dist < 5 && hoveredPoint) {
                 selectedPoint = hoveredPoint;
                 showConstellationDetail(selectedPoint);
+            }
+        });
+
+        // Touch event handlers for mobile/tablet support
+        let initialTouchDist = null;
+        let initialZoom = 1.0;
+        let touchStartPanX = 0;
+        let touchStartPanY = 0;
+        let isTouching = false;
+
+        canvas.addEventListener("touchstart", (e) => {
+            hideHint();
+            if (e.touches.length === 1) {
+                isTouching = true;
+                const touch = e.touches[0];
+                startX = touch.clientX - panX;
+                startY = touch.clientY - panY;
+                dragStartX = touch.clientX;
+                dragStartY = touch.clientY;
+                initialTouchDist = null;
+            } else if (e.touches.length === 2) {
+                isTouching = false;
+                const touch1 = e.touches[0];
+                const touch2 = e.touches[1];
+                initialTouchDist = Math.hypot(touch1.clientX - touch2.clientX, touch1.clientY - touch2.clientY);
+                initialZoom = zoom;
+                
+                const midX = (touch1.clientX + touch2.clientX) / 2;
+                const midY = (touch1.clientY + touch2.clientY) / 2;
+                
+                const rect = canvas.getBoundingClientRect();
+                const cx = midX - rect.left;
+                const cy = midY - rect.top;
+                touchStartPanX = panX;
+                touchStartPanY = panY;
+            }
+        }, { passive: true });
+
+        canvas.addEventListener("touchmove", (e) => {
+            if (e.touches.length === 1 && isTouching) {
+                const touch = e.touches[0];
+                panX = touch.clientX - startX;
+                panY = touch.clientY - startY;
+                drawConstellation();
+            } else if (e.touches.length === 2 && initialTouchDist) {
+                const touch1 = e.touches[0];
+                const touch2 = e.touches[1];
+                const currentDist = Math.hypot(touch1.clientX - touch2.clientX, touch1.clientY - touch2.clientY);
+                const factor = currentDist / initialTouchDist;
+                
+                let newZoom = initialZoom * factor;
+                newZoom = Math.max(0.2, Math.min(5.0, newZoom));
+                
+                const rect = canvas.getBoundingClientRect();
+                const midX = (touch1.clientX + touch2.clientX) / 2 - rect.left;
+                const midY = (touch1.clientY + touch2.clientY) / 2 - rect.top;
+                
+                const tx = (midX - rect.width / 2 - touchStartPanX) / initialZoom;
+                const ty = (midY - rect.height / 2 - touchStartPanY) / initialZoom;
+                
+                panX = midX - rect.width / 2 - tx * newZoom;
+                panY = midY - rect.height / 2 - ty * newZoom;
+                zoom = newZoom;
+                drawConstellation();
+            }
+        }, { passive: true });
+
+        canvas.addEventListener("touchend", (e) => {
+            if (e.touches.length === 0) {
+                if (isTouching) {
+                    const dist = Math.hypot(e.changedTouches[0].clientX - dragStartX, e.changedTouches[0].clientY - dragStartY);
+                    if (dist < 5) {
+                        const rect = canvas.getBoundingClientRect();
+                        const touchX = e.changedTouches[0].clientX - rect.left;
+                        const touchY = e.changedTouches[0].clientY - rect.top;
+                        
+                        const fakeEvent = {
+                            clientX: e.changedTouches[0].clientX,
+                            clientY: e.changedTouches[0].clientY
+                        };
+                        checkHover(fakeEvent);
+                        
+                        if (hoveredPoint) {
+                            selectedPoint = hoveredPoint;
+                            showConstellationDetail(selectedPoint);
+                        }
+                    }
+                }
+                isTouching = false;
+                initialTouchDist = null;
             }
         });
 
@@ -1281,8 +1901,8 @@ document.addEventListener("DOMContentLoaded", () => {
     }
 
     if (btnReembedAll) {
-        btnReembedAll.addEventListener("click", () => {
-            if (!confirm("Are you sure you want to regenerate and populate embeddings for all database runs? This calls the Google Embedding API for all runs.")) return;
+        btnReembedAll.addEventListener("click", async () => {
+            if (!await showConfirm("Are you sure you want to regenerate and populate embeddings for all database runs? This calls the Google Embedding API for all runs.", false)) return;
             
             btnReembedAll.disabled = true;
             btnReembedAll.innerHTML = `<i data-lucide="refresh-cw" class="spin"></i> Re-embedding...`;
@@ -1297,11 +1917,11 @@ document.addEventListener("DOMContentLoaded", () => {
                     return Promise.all(promises);
                 })
                 .then(() => {
-                    alert("Embeddings successfully generated for all run history!");
+                    showToast("Embeddings successfully generated for all run history!", "success");
                     loadConstellation();
                 })
                 .catch(err => {
-                    alert("Error backfilling embeddings: " + err.message);
+                    showToast("Error backfilling embeddings: " + err.message, "error");
                 })
                 .finally(() => {
                     btnReembedAll.disabled = false;
@@ -1309,5 +1929,188 @@ document.addEventListener("DOMContentLoaded", () => {
                     lucide.createIcons();
                 });
         });
+     }
+
+    // --- Advanced Search Logic ---
+    const includeRulesList = document.getElementById("include-rules-list");
+    const excludeRulesList = document.getElementById("exclude-rules-list");
+    const btnAddInclude = document.getElementById("btn-add-include");
+    const btnAddExclude = document.getElementById("btn-add-exclude");
+    const btnClearSearch = document.getElementById("btn-clear-search");
+    const btnRunSearch = document.getElementById("btn-run-search");
+    const searchResultsGrid = document.getElementById("search-results-grid");
+    const searchResultCount = document.getElementById("search-result-count");
+    const searchModeBtns = document.querySelectorAll("[data-search-mode]");
+    let searchMode = "AND";
+
+    const categoryOptions = [
+        { value: "person_label", text: "Person Label" },
+        { value: "handle", text: "Platform Handle" },
+        { value: "top_type", text: "Topwear Type" },
+        { value: "top_color", text: "Topwear Color" },
+        { value: "bottom_type", text: "Bottomwear Type" },
+        { value: "bottom_color", text: "Bottomwear Color" },
+        { value: "hair_color", text: "Hair Color" }
+    ];
+
+    function createSearchRuleRow() {
+        const row = document.createElement("div");
+        row.className = "search-rule-row";
+
+        const select = document.createElement("select");
+        select.className = "rule-category";
+        categoryOptions.forEach(opt => {
+            const option = document.createElement("option");
+            option.value = opt.value;
+            option.textContent = opt.text;
+            select.appendChild(option);
+        });
+
+        const input = document.createElement("input");
+        input.type = "text";
+        input.className = "rule-value";
+        input.placeholder = "Enter value...";
+
+        const removeBtn = document.createElement("button");
+        removeBtn.className = "btn-remove-rule";
+        removeBtn.innerHTML = `<i data-lucide="x"></i>`;
+        removeBtn.addEventListener("click", () => {
+            row.remove();
+            lucide.createIcons();
+        });
+
+        row.appendChild(select);
+        row.appendChild(input);
+        row.appendChild(removeBtn);
+        
+        lucide.createIcons();
+        return row;
+    }
+
+    if (btnAddInclude) {
+        btnAddInclude.addEventListener("click", () => {
+            includeRulesList.appendChild(createSearchRuleRow());
+        });
+    }
+
+    if (btnAddExclude) {
+        btnAddExclude.addEventListener("click", () => {
+            excludeRulesList.appendChild(createSearchRuleRow());
+        });
+    }
+
+    if (btnClearSearch) {
+        btnClearSearch.addEventListener("click", () => {
+            includeRulesList.innerHTML = "";
+            excludeRulesList.innerHTML = "";
+            searchResultsGrid.innerHTML = "";
+            searchResultCount.textContent = "";
+        });
+    }
+
+    searchModeBtns.forEach(btn => {
+        btn.addEventListener("click", () => {
+            searchModeBtns.forEach(b => b.classList.remove("active"));
+            btn.classList.add("active");
+            searchMode = btn.getAttribute("data-search-mode");
+        });
+    });
+
+    if (btnRunSearch) {
+        btnRunSearch.addEventListener("click", () => {
+            const includeRules = [];
+            includeRulesList.querySelectorAll(".search-rule-row").forEach(row => {
+                includeRules.push({
+                    category: row.querySelector(".rule-category").value,
+                    value: row.querySelector(".rule-value").value
+                });
+            });
+
+            const excludeRules = [];
+            excludeRulesList.querySelectorAll(".search-rule-row").forEach(row => {
+                excludeRules.push({
+                    category: row.querySelector(".rule-category").value,
+                    value: row.querySelector(".rule-value").value
+                });
+            });
+
+            if (includeRules.length === 0 && excludeRules.length === 0) {
+                showToast("Please add at least one search rule.", "warning");
+                return;
+            }
+
+            btnRunSearch.disabled = true;
+            btnRunSearch.innerHTML = `<i data-lucide="loader" class="spin" style="width: 16px; height: 16px; margin-right: 0.3rem;"></i> Searching...`;
+            lucide.createIcons();
+
+            fetch("/api/search", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    include: includeRules,
+                    exclude: excludeRules,
+                    mode: searchMode
+                })
+            })
+            .then(res => res.json())
+            .then(data => {
+                renderSearchResults(data);
+            })
+            .catch(err => {
+                showToast("Search failed: " + err.message, "error");
+            })
+            .finally(() => {
+                btnRunSearch.disabled = false;
+                btnRunSearch.innerHTML = `<i data-lucide="search" style="width: 16px; height: 16px; margin-right: 0.3rem;"></i> Search Database`;
+                lucide.createIcons();
+            });
+        });
+    }
+
+    function renderSearchResults(results) {
+        searchResultsGrid.innerHTML = "";
+        searchResultCount.textContent = `${results.length} match(es) found`;
+
+        if (results.length === 0) {
+            searchResultsGrid.innerHTML = `
+                <div style="grid-column: 1/-1; text-align: center; color: rgba(255,255,255,0.4); padding: 3rem 1rem;">
+                    No outfits match your query.
+                </div>`;
+            return;
+        }
+
+        results.forEach(person => {
+            const card = document.createElement("div");
+            card.className = "search-result-card glass-card";
+            
+            const handleBadge = person.platform_handle 
+                ? `<span class="attr-badge topwear" style="font-size: 0.65rem; padding: 0.15rem 0.4rem;">${person.platform_name || 'Watermark'}: ${person.platform_handle}</span>` 
+                : '';
+
+            const videoBtn = `<button class="btn-video-link" data-run-id="${person.run_id}" data-video-name="${person.source_video}"><i data-lucide="play-circle"></i> Video</button>`;
+            
+            card.innerHTML = `
+                <div class="run-card-header">
+                    <div class="run-card-title" style="display: flex; align-items: center; flex-wrap: wrap; gap: 0.25rem;">
+                        <span style="vertical-align: middle;">${person.source_video}</span>
+                        ${handleBadge}
+                    </div>
+                    ${videoBtn}
+                </div>
+                <div id="search-card-attrs-${person.person_id}"></div>
+            `;
+            
+            searchResultsGrid.appendChild(card);
+            
+            // Render attributes using existing logic
+            const attrsContainer = card.querySelector(`#search-card-attrs-${person.person_id}`);
+            const personCardElement = createPersonCard(person, false, person.run_id);
+            personCardElement.style.padding = "0";
+            personCardElement.style.border = "none";
+            personCardElement.style.background = "transparent";
+            attrsContainer.appendChild(personCardElement);
+        });
+
+        lucide.createIcons();
     }
 });

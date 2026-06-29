@@ -4,7 +4,7 @@ from typing import List, Dict, Any, Optional
 
 def get_db_connection(db_path: str) -> sqlite3.Connection:
     """Creates a connection to SQLite, enabling foreign keys and row factory."""
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=30.0)
     conn.execute("PRAGMA foreign_keys = ON;")
     conn.row_factory = sqlite3.Row
     return conn
@@ -42,6 +42,25 @@ def migrate_db(conn: sqlite3.Connection) -> None:
                 if "duplicate column" not in err_msg and "already exists" not in err_msg:
                     raise
 
+    # Dynamic migration of runs table for platform metadata
+    cursor.execute("PRAGMA table_info(runs);")
+    existing_runs_cols = {row["name"] for row in cursor.fetchall()}
+    
+    new_runs_cols = [
+        ("platform_name", "TEXT"),
+        ("platform_handle", "TEXT"),
+        ("video_filename", "TEXT"),
+        ("status_detail", "TEXT")
+    ]
+    for col_name, col_type in new_runs_cols:
+        if col_name not in existing_runs_cols:
+            try:
+                conn.execute(f"ALTER TABLE runs ADD COLUMN {col_name} {col_type};")
+            except sqlite3.OperationalError as e:
+                err_msg = str(e).lower()
+                if "duplicate column" not in err_msg and "already exists" not in err_msg:
+                    raise
+
 def init_db(db_path: str) -> None:
     """Creates the tables for runs and people if they do not exist."""
     with get_db_connection(db_path) as conn:
@@ -59,6 +78,10 @@ def init_db(db_path: str) -> None:
                 chunks_total  INTEGER DEFAULT 1,
                 chunks_skipped INTEGER DEFAULT 0,
                 raw_json      TEXT,
+                platform_name TEXT,
+                platform_handle TEXT,
+                video_filename TEXT,
+                status_detail  TEXT,
                 created_at    TEXT    NOT NULL DEFAULT (datetime('now'))
             );
         """)
@@ -155,13 +178,23 @@ def save_run(db_path: str, result: Dict[str, Any]) -> int:
         output_tokens = metadata.get("total_output_tokens", 0)
         est_cost_usd = metadata.get("estimated_cost_usd", 0.0)
 
+        # Extract platform metadata from the first chunk
+        platform_name = None
+        platform_handle = None
+        if chunks:
+            platform_meta = chunks[0].get("platform_metadata")
+            if platform_meta:
+                platform_name = platform_meta.get("platform")
+                platform_handle = platform_meta.get("handle")
+
         cursor.execute(
             """
             INSERT INTO runs (
                 source_video, model, status, duration_sec, 
                 input_tokens, output_tokens, est_cost_usd, 
-                chunks_total, chunks_skipped, raw_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                chunks_total, chunks_skipped, raw_json,
+                platform_name, platform_handle
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 result.get("source_video", ""),
@@ -174,7 +207,9 @@ def save_run(db_path: str, result: Dict[str, Any]) -> int:
                 est_cost_usd,
                 chunks_total,
                 chunks_skipped,
-                json.dumps(result)
+                json.dumps(result),
+                platform_name,
+                platform_handle
             )
         )
         run_id = cursor.lastrowid
@@ -236,7 +271,7 @@ def save_run(db_path: str, result: Dict[str, Any]) -> int:
         conn.commit()
         return run_id
 
-def create_placeholder_run(db_path: str, source_video: str, model: str) -> int:
+def create_placeholder_run(db_path: str, source_video: str, model: str, video_filename: str = None) -> int:
     """Saves a placeholder run record with status='processing' and returns the run_id."""
     with get_db_connection(db_path) as conn:
         cursor = conn.cursor()
@@ -245,10 +280,10 @@ def create_placeholder_run(db_path: str, source_video: str, model: str) -> int:
             INSERT INTO runs (
                 source_video, model, status, duration_sec, 
                 input_tokens, output_tokens, est_cost_usd, 
-                chunks_total, chunks_skipped, raw_json
-            ) VALUES (?, ?, 'processing', 0.0, 0, 0, 0.0, 0, 0, NULL)
+                chunks_total, chunks_skipped, raw_json, video_filename, status_detail
+            ) VALUES (?, ?, 'processing', 0.0, 0, 0, 0.0, 0, 0, NULL, ?, 'safety_check')
             """,
-            (source_video, model)
+            (source_video, model, video_filename)
         )
         conn.commit()
         run_id = cursor.lastrowid
@@ -375,6 +410,7 @@ def get_all_runs(db_path: str) -> List[Dict[str, Any]]:
             SELECT id, source_video, model, status, duration_sec, 
                    input_tokens, output_tokens, est_cost_usd, 
                    chunks_total, chunks_skipped, created_at,
+                   platform_name, platform_handle, video_filename,
                    (SELECT count(*) FROM people WHERE people.run_id = runs.id) AS people_count
             FROM runs
             ORDER BY created_at DESC, id DESC
@@ -415,6 +451,7 @@ def get_run_detail(db_path: str, run_id: int) -> Optional[Dict[str, Any]]:
                     pass
 
             people_list.append({
+                "person_id": p["id"],
                 "chunk_index": p["chunk_index"],
                 "person_label": p["person_label"],
                 "hair": {
@@ -598,3 +635,94 @@ def has_outfit_embedding(db_path: str, person_id: int) -> bool:
         cursor = conn.cursor()
         cursor.execute("SELECT 1 FROM outfit_embeddings WHERE person_id = ?", (person_id,))
         return cursor.fetchone() is not None
+
+def search_people(db_path: str, include_rules: List[Dict[str, str]], exclude_rules: List[Dict[str, str]], mode: str = "AND") -> List[Dict[str, Any]]:
+    """Searches for people matching the include/exclude rules with specified AND/OR mode."""
+    field_map = {
+        "top_type": "p.top_type",
+        "top_color": "p.top_color",
+        "bottom_type": "p.bottom_type",
+        "bottom_color": "p.bottom_color",
+        "hair_color": "p.hair_color",
+        "handle": "r.platform_handle",
+        "person_label": "p.person_label"
+    }
+    
+    conditions = []
+    params = []
+    
+    include_clauses = []
+    for rule in include_rules:
+        field = field_map.get(rule.get("category"))
+        val = rule.get("value", "").strip()
+        if field and val:
+            include_clauses.append(f"LOWER({field}) LIKE ?")
+            params.append(f"%{val.lower()}%")
+            
+    exclude_clauses = []
+    for rule in exclude_rules:
+        field = field_map.get(rule.get("category"))
+        val = rule.get("value", "").strip()
+        if field and val:
+            exclude_clauses.append(f"LOWER({field}) NOT LIKE ?")
+            params.append(f"%{val.lower()}%")
+            
+    where_parts = []
+    if include_clauses:
+        joiner = " AND " if mode.upper() == "AND" else " OR "
+        where_parts.append(f"({joiner.join(include_clauses)})")
+        
+    if exclude_clauses:
+        # Multiple excludes are combined with AND (must not match any of them)
+        where_parts.append("(" + " AND ".join(exclude_clauses) + ")")
+        
+    where_sql = " AND ".join(where_parts) if where_parts else "1=1"
+    
+    sql = f"""
+        SELECT p.id as person_id, p.run_id, p.person_label, 
+               p.hair_color, p.hair_texture, p.hair_length, p.hair_style,
+               p.top_type, p.top_color, p.top_fit, p.top_fabric, p.top_pattern, p.top_neckline, p.top_sleeve_length, p.top_details,
+               p.bottom_type, p.bottom_color, p.bottom_fit, p.bottom_fabric, p.bottom_pattern, p.bottom_garment_length, p.bottom_details,
+               r.source_video, r.model, r.created_at, r.platform_name, r.platform_handle
+        FROM people p
+        JOIN runs r ON p.run_id = r.id
+        WHERE {where_sql}
+        ORDER BY r.created_at DESC, p.id DESC
+    """
+    
+    with get_db_connection(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute(sql, params)
+        rows = cursor.fetchall()
+        
+        people_list = []
+        for p in rows:
+            top_details = []
+            if p["top_details"]:
+                try: top_details = json.loads(p["top_details"])
+                except: pass
+            bottom_details = []
+            if p["bottom_details"]:
+                try: bottom_details = json.loads(p["bottom_details"])
+                except: pass
+                
+            people_list.append({
+                "person_id": p["person_id"],
+                "run_id": p["run_id"],
+                "source_video": p["source_video"],
+                "model": p["model"],
+                "created_at": p["created_at"],
+                "platform_name": p["platform_name"],
+                "platform_handle": p["platform_handle"],
+                "person_label": p["person_label"],
+                "hair": {"color": p["hair_color"], "texture": p["hair_texture"], "length": p["hair_length"], "style": p["hair_style"]},
+                "top": {"type": p["top_type"], "color": p["top_color"], "fit": p["top_fit"], "fabric": p["top_fabric"], "pattern": p["top_pattern"], "neckline": p["top_neckline"], "sleeve_length": p["top_sleeve_length"], "details": top_details},
+                "bottom": {"type": p["bottom_type"], "color": p["bottom_color"], "fit": p["bottom_fit"], "fabric": p["bottom_fabric"], "pattern": p["bottom_pattern"], "garment_length": p["bottom_garment_length"], "details": bottom_details}
+            })
+        return people_list
+
+def update_run_status_detail(db_path: str, run_id: int, detail: str) -> None:
+    """Updates the status_detail column for a run."""
+    with get_db_connection(db_path) as conn:
+        conn.execute("UPDATE runs SET status_detail = ? WHERE id = ?", (detail, run_id))
+        conn.commit()

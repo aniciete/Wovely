@@ -189,6 +189,10 @@ class TestApp(unittest.TestCase):
                     "chunk_index": 0,
                     "time_range_seconds": [0.0, 5.0],
                     "status": "ok",
+                    "platform_metadata": {
+                        "platform": "TikTok",
+                        "handle": "@amy_fashion"
+                    },
                     "people": [
                         {
                             "person_label": "Amy",
@@ -201,6 +205,14 @@ class TestApp(unittest.TestCase):
             ]
         })
         
+        # Verify platform metadata is saved
+        with database.get_db_connection(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT platform_name, platform_handle FROM runs WHERE id = ?", (run_id,))
+            row = cursor.fetchone()
+            self.assertEqual(row["platform_name"], "TikTok")
+            self.assertEqual(row["platform_handle"], "@amy_fashion")
+
         # Verify constellation output
         response = self.client.get("/api/constellation?mode=full")
         self.assertEqual(response.status_code, 200)
@@ -220,6 +232,153 @@ class TestApp(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         res_json = json.loads(response.data.decode("utf-8"))
         self.assertTrue(res_json["success"])
+
+        # Verify PUT update person endpoint
+        with database.get_db_connection(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM people WHERE person_label = 'Amy'")
+            person_row = cursor.fetchone()
+            person_id = person_row["id"]
+            
+        update_data = {
+            "hair": {"color": "blonde", "texture": "wavy", "length": "long", "style": "braided"},
+            "top": {"type": "halter top", "color": "crimson", "fit": "fitted", "fabric": "knit", "pattern": "solid", "details": ["ribbed"]},
+            "bottom": {"type": "jeans", "color": "blue", "fit": "slim", "fabric": "denim", "pattern": "solid", "details": []}
+        }
+        
+        response = self.client.put(f"/api/people/{person_id}", json=update_data)
+        self.assertEqual(response.status_code, 200)
+        res_json = json.loads(response.data.decode("utf-8"))
+        self.assertTrue(res_json["success"])
+        
+        # Verify the update in SQLite
+        with database.get_db_connection(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT hair_style, top_color FROM people WHERE id = ?", (person_id,))
+            updated_row = cursor.fetchone()
+            self.assertEqual(updated_row["hair_style"], "braided")
+            self.assertEqual(updated_row["top_color"], "crimson")
+
+    def test_api_video_endpoints(self):
+        """Verify video serving and cleanup on delete endpoints."""
+        import os
+
+        # Write a dummy video file in the uploads folder
+        video_filename = "dummy_test_video.mp4"
+        video_filepath = os.path.join(app.app.config["UPLOAD_FOLDER"], video_filename)
+        with open(video_filepath, "wb") as f:
+            f.write(b"fake mp4 video content")
+
+        # Save a run linked to this dummy video
+        run_id = database.save_run(self.db_path, {
+            "source_video": "test_clip.mp4",
+            "model": "gemini-3-flash-preview",
+            "chunks": [
+                {
+                    "chunk_index": 0,
+                    "time_range_seconds": [0.0, 5.0],
+                    "status": "ok",
+                    "platform_metadata": {
+                        "platform": "TikTok",
+                        "handle": "@test_user"
+                    },
+                    "people": []
+                }
+            ]
+        })
+        
+        # Manually link the video_filename since save_run does not extract it from mock chunk structures directly
+        with database.get_db_connection(self.db_path) as conn:
+            conn.execute("UPDATE runs SET video_filename = ? WHERE id = ?", (video_filename, run_id))
+            conn.commit()
+
+        # 1. Test video serving endpoint
+        response = self.client.get(f"/api/runs/{run_id}/video")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, b"fake mp4 video content")
+
+        # 2. Test video deletion cleanup on run delete
+        response = self.client.delete(f"/api/runs/{run_id}")
+        self.assertEqual(response.status_code, 200)
+        
+        # Verify database record deleted
+        with database.get_db_connection(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM runs WHERE id = ?", (run_id,))
+            self.assertIsNone(cursor.fetchone())
+
+        # Verify video file deleted from uploads folder
+        self.assertFalse(os.path.exists(video_filepath))
+
+    def test_api_advanced_search(self):
+        """Verify advanced search endpoint logic (AND/OR matching & blacklists)."""
+        # Save a mock run with outfit detail
+        run_id = database.save_run(self.db_path, {
+            "source_video": "amy_runway.mp4",
+            "model": "gemini-3.1-flash-lite",
+            "chunks": [
+                {
+                    "chunk_index": 0,
+                    "time_range_seconds": [0.0, 5.0],
+                    "status": "ok",
+                    "platform_metadata": {
+                        "platform": "TikTok",
+                        "handle": "@amy_fashion"
+                    },
+                    "people": [
+                        {
+                            "person_label": "Amy",
+                            "hair": {"color": "blonde", "texture": "wavy", "length": "long", "style": "half-up"},
+                            "top": {"type": "halter top", "color": "red", "fit": "fitted", "fabric": "knit", "pattern": "solid", "details": ["ribbed"]},
+                            "bottom": {"type": "jeans", "color": "blue", "fit": "slim", "fabric": "denim", "pattern": "solid", "details": []}
+                        }
+                    ]
+                }
+            ]
+        })
+
+        # Test case 1: Matching include rule (Topwear Color = red)
+        search_query = {
+            "include": [{"category": "top_color", "value": "red"}],
+            "exclude": [],
+            "mode": "AND"
+        }
+        response = self.client.post("/api/search", json=search_query)
+        self.assertEqual(response.status_code, 200)
+        results = json.loads(response.data.decode("utf-8"))
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["person_label"], "Amy")
+
+        # Test case 2: Match exclude blacklist rule (Exclude Bottomwear Color = blue)
+        search_query = {
+            "include": [{"category": "top_color", "value": "red"}],
+            "exclude": [{"category": "bottom_color", "value": "blue"}],
+            "mode": "AND"
+        }
+        response = self.client.post("/api/search", json=search_query)
+        self.assertEqual(response.status_code, 200)
+        results = json.loads(response.data.decode("utf-8"))
+        self.assertEqual(len(results), 0)  # Excluded!
+
+    def test_run_status_detail(self):
+        """Verify update_run_status_detail updates status_detail and is returned by API."""
+        # Create a placeholder run
+        run_id = database.create_placeholder_run(self.db_path, "status_test.mp4", "gemini-1.5-flash")
+        
+        # Verify initial placeholder status detail is 'safety_check'
+        response = self.client.get(f"/api/runs/{run_id}")
+        self.assertEqual(response.status_code, 200)
+        res_json = json.loads(response.data.decode("utf-8"))
+        self.assertEqual(res_json["status_detail"], "safety_check")
+
+        # Update to another step
+        database.update_run_status_detail(self.db_path, run_id, "processing_on_gemini")
+        
+        # Verify updated value is returned by endpoint
+        response = self.client.get(f"/api/runs/{run_id}")
+        self.assertEqual(response.status_code, 200)
+        res_json = json.loads(response.data.decode("utf-8"))
+        self.assertEqual(res_json["status_detail"], "processing_on_gemini")
 
 if __name__ == "__main__":
     unittest.main()

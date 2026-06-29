@@ -110,6 +110,10 @@ erDiagram
 ### Prerequisites
 - Python 3.10+
 - Google Gemini API Key
+- **ExifTool** (Optional, required for embedding AI findings directly into video files):
+  - macOS: `brew install exiftool`
+  - Linux: `sudo apt-get install libimage-exiftool-perl` (or equivalent)
+  - Windows: Download from [exiftool.org](https://exiftool.org/) and add to PATH.
 
 ### Installation
 
