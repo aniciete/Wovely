@@ -3,20 +3,36 @@
 .venv/
 venv/
 env/
+.python-version
 
-# Python
+# Dependencies
+node_modules/
+
+# Python Caches, Bytecode & Tests
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+.cache/
 
-# Database
+# Databases, Storage & SQLite Temp Files
 *.db
 *.sqlite3
-
-# Uploads
+*.db-journal
+*.db-shm
+*.db-wal
 uploads/
 
-# Tool outputs / temporary files
+# Tool Outputs & Temp Files
 repomix-output.xml
 skills-lock.json
+
+# IDEs & System Files
+.vscode/
+.idea/
+.DS_Store
+*.log
+*.swp

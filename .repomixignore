@@ -1,0 +1,60 @@
+# Exclude git internal files
+.git/
+
+# Exclude package manager and build directories
+node_modules/
+dist/
+build/
+*.egg-info/
+
+# Exclude virtual environments
+.venv/
+venv/
+env/
+
+# Exclude python caches and bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+.coverage
+htmlcov/
+.cache/
+
+# Exclude database files and locks
+*.db
+*.sqlite3
+*.db-journal
+*.db-shm
+*.db-wal
+
+# Exclude uploaded files and media directories
+uploads/
+
+# Exclude IDE files and developer workspace settings
+.vscode/
+.idea/
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.swp
+
+# Exclude secrets and configs
+.env
+.env.template
+.python-version
+
+# Exclude agent-specific skills and configurations
+.agents/
+skills-lock.json
+
+# Exclude output packs of repomix itself
+repomix-output.xml
+repomix-output.txt
+repomix-output.md
+
+# Exclude generic logs
+*.log
